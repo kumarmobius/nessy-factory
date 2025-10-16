@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -172,6 +172,26 @@ implementation:
                     os.makedirs(d, exist_ok=True)
 
             # Normalize/copy model code
+            src = args.model_py_in
+            dst = args.model_py_out
+
+            if os.path.isdir(dst) or dst.endswith("/data"):
+                os.makedirs(dst, exist_ok=True)
+                dst_file = os.path.join(dst, "model.py")
+            else:
+                os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                dst_file = dst
+
+            try:
+                same = os.path.exists(src) and os.path.exists(dst_file) and os.path.samefile(src, dst_file)
+            except Exception:
+                same = os.path.abspath(src) == os.path.abspath(dst_file)
+            if same:
+                dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
+            
+            print("[DEBUG] model_py_in (src):", src)
+            print("[DEBUG] model_py_out file (dst):", dst_file)
+            
             src_py = _pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, args.model_py_out)
 
@@ -191,8 +211,8 @@ implementation:
                 train_corpus=args.train_corpus,
                 model_config=args.model_config,
                 model_weights=args.model_weights,
-                model_py_in=args.model_py_out,  # use the copied file
-                model_py_out=args.model_py_out,
+                model_py_in=src,  # use the copied file
+                model_py_out=dst_file,
                 learning_rate=args.learning_rate,
                 min_lr=args.min_lr,
                 warmup_steps=args.warmup_steps,
