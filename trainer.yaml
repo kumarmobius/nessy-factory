@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad-accum, and best/final checkpoints.
 
 inputs:
@@ -69,7 +69,7 @@ outputs:
   - name: model_py
     type: Data
   - name: schema_json
-    type: Data
+    type: String
 
 implementation:
   container:
@@ -82,25 +82,10 @@ implementation:
         set -o pipefail
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
-        import argparse, json, os, sys
+        import argparse, json, os
         from pathlib import Path
 
-        # ---- positional→flag normalizer (Python-side; avoids bash gotchas) ----
-        def normalize_argv(argv):
-          expected = ["--tokenizer-json", "--train-corpus", "--model-config", "--model-weights", "--model-py-in"]
-          out = []
-          i = 0
-          for a in argv:
-            if not a.startswith("-") and i < len(expected):
-              out.extend([expected[i], a])
-              i += 1
-            else:
-              out.append(a)
-          return out
-        # ----------------------------------------------------------------------
-
         def main():
-          # Build parser but DON'T parse yet
           ap = argparse.ArgumentParser()
           ap.add_argument("--tokenizer-json", required=True)
           ap.add_argument("--train-corpus", required=True)
@@ -129,31 +114,27 @@ implementation:
           ap.add_argument("--training-report", required=True)
           ap.add_argument("--loss-curve-csv", required=True)
           ap.add_argument("--schema-output", required=True)
+          args = ap.parse_args()
 
-          # Normalize argv to tolerate positional inputs
-          argv = normalize_argv(sys.argv[1:])
-          print("[DEBUG] argv after normalize:", " ".join(argv))
-          args = ap.parse_args(argv)
-
-          # Imports kept inside container
           from nesy_factory.language_model.train import GemmaTrainer
 
-          # Ensure output dirs exist
-          for p in (args.best_weights, args.final_weights, args.training_report,
-                    args.loss_curve_csv, args.model_py_out, args.schema_output):
+          # Ensure output directories exist
+          for p in (
+            args.best_weights, args.final_weights, args.training_report,
+            args.loss_curve_csv, args.model_py_out, args.schema_output
+          ):
             d = os.path.dirname(p)
             if d:
               os.makedirs(d, exist_ok=True)
 
-          # Quick existence checks
+          # Helpful diagnostics
           print("Pre-train existence checks:")
           print(" - tokenizer_json exists:", Path(args.tokenizer_json).exists())
-          print(" - train_corpus exists:",   Path(args.train_corpus).exists())
-          print(" - model_config exists:",   Path(args.model_config).exists())
-          print(" - model_weights exists:",  Path(args.model_weights).exists())
-          print(" - model_py_in exists:",    Path(args.model_py_in).exists())
+          print(" - train_corpus exists:", Path(args.train_corpus).exists())
+          print(" - model_config exists:", Path(args.model_config).exists())
+          print(" - model_weights exists:", Path(args.model_weights).exists())
+          print(" - model_py_in exists:", Path(args.model_py_in).exists())
 
-          # Run trainer
           trainer = GemmaTrainer()
           trainer.run(
             tokenizer_json=args.tokenizer_json,
@@ -182,7 +163,7 @@ implementation:
             loss_curve_csv=args.loss_curve_csv,
           )
 
-          # Summarize outputs
+          # Schema summary
           try:
             with open(args.training_report, "r", encoding="utf-8") as f:
               rep = json.load(f)
@@ -238,55 +219,58 @@ implementation:
           main()
         PY
 
+        echo "[DEBUG] args from KFP:" "$@"
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
     args:
       - --tokenizer-json
-      - inputPath: tokenizer_json
+      - {inputPath: tokenizer_json}
       - --train-corpus
-      - inputPath: train_corpus
+      - {inputPath: train_corpus}
       - --model-config
-      - inputPath: model_config
+      - {inputPath: model_config}
       - --model-weights
-      - inputPath: model_weights
+      - {inputPath: model_weights}
       - --model-py-in
-      - inputPath: model_py_in
+      - {inputPath: model_py_in}
+
       - --learning-rate
-      - inputValue: learning_rate
+      - {inputValue: learning_rate}
       - --min-lr
-      - inputValue: min_lr
+      - {inputValue: min_lr}
       - --warmup-steps
-      - inputValue: warmup_steps
+      - {inputValue: warmup_steps}
       - --max-iters
-      - inputValue: max_iters
+      - {inputValue: max_iters}
       - --batch-size
-      - inputValue: batch_size
+      - {inputValue: batch_size}
       - --block-size
-      - inputValue: block_size
+      - {inputValue: block_size}
       - --grad-accum
-      - inputValue: grad_accum
+      - {inputValue: grad_accum}
       - --eval-interval
-      - inputValue: eval_interval
+      - {inputValue: eval_interval}
       - --eval-iters
-      - inputValue: eval_iters
+      - {inputValue: eval_iters}
       - --weight-decay
-      - inputValue: weight_decay
+      - {inputValue: weight_decay}
       - --beta2
-      - inputValue: beta2
+      - {inputValue: beta2}
       - --clip-grad-norm
-      - inputValue: clip_grad_norm
+      - {inputValue: clip_grad_norm}
       - --val-fraction
-      - inputValue: val_fraction
+      - {inputValue: val_fraction}
       - --num-proc
-      - inputValue: num_proc
+      - {inputValue: num_proc}
+
       - --best-weights
-      - outputPath: best_weights
+      - {outputPath: best_weights}
       - --final-weights
-      - outputPath: final_weights
+      - {outputPath: final_weights}
       - --training-report
-      - outputPath: training_report
+      - {outputPath: training_report}
       - --loss-curve-csv
-      - outputPath: loss_curve_csv
+      - {outputPath: loss_curve_csv}
       - --model-py-out
-      - outputPath: model_py
+      - {outputPath: model_py}
       - --schema-output
-      - outputPath: schema_json
+      - {outputPath: schema_json}
