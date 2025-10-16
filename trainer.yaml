@@ -1,4 +1,4 @@
-name: LM Trainerr
+name: LM Trainer
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -81,24 +81,20 @@ implementation:
       - |-
         set -o pipefail
 
-        echo "[DEBUG] argv from KFP:" "$@"
-        echo "[DEBUG] mounted /tmp/inputs (if present):"
-        find /tmp/inputs -maxdepth 2 -type f -printf "%P\n" 2>/dev/null || true
-
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, shutil
         from pathlib import Path
 
-        def find_model_py_file(path_str: str) -> str:
+        def pick_model_py(path_str: str) -> str:
             p = Path(path_str)
             if p.is_file():
                 return str(p)
             if not p.exists():
                 raise FileNotFoundError(f"model_py_in not found: {p}")
-            py_files = sorted([pp for pp in p.iterdir() if pp.suffix == ".py"])
-            if not py_files:
-                raise FileNotFoundError(f"No .py file found under directory: {p}")
-            return str(py_files[0])
+            for cand in p.iterdir():
+                if cand.suffix == ".py":
+                    return str(cand)
+            raise FileNotFoundError(f"No .py file under directory: {p}")
 
         def main():
             ap = argparse.ArgumentParser()
@@ -131,37 +127,22 @@ implementation:
             ap.add_argument("--schema-output", required=True)
             args = ap.parse_args()
 
-            # Print the resolved arguments for debugging
-            print("[DEBUG] Parsed args:")
-            for k, v in vars(args).items():
-                print(f"  - {k}: {v}")
-
-            # Lazy import inside container
             from nesy_factory.language_model.train import GemmaTrainer
 
-            # Ensure output directories exist
-            for out_path in (
+            # Ensure output dirs exist
+            for p in (
                 args.best_weights, args.final_weights, args.training_report,
                 args.loss_curve_csv, args.model_py_out, args.schema_output
             ):
-                d = os.path.dirname(out_path)
+                d = os.path.dirname(p)
                 if d:
                     os.makedirs(d, exist_ok=True)
 
-            # Existence checks
-            print("[DEBUG] Existence checks:")
-            print("  tokenizer_json:", os.path.exists(args.tokenizer_json))
-            print("  train_corpus:", os.path.exists(args.train_corpus))
-            print("  model_config:", os.path.exists(args.model_config))
-            print("  model_weights:", os.path.exists(args.model_weights))
-            print("  model_py_in:", os.path.exists(args.model_py_in))
-
-            # Ensure we have a concrete .py file and copy to model_py_out
-            src_py = find_model_py_file(args.model_py_in)
+            # Choose/copy model code to the output path
+            src_py = pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, args.model_py_out)
-            print(f"[INFO] Copied model code: {src_py} -> {args.model_py_out}")
 
-            # Run training
+            # Train
             trainer = GemmaTrainer()
             trainer.run(
                 tokenizer_json=args.tokenizer_json,
@@ -190,7 +171,7 @@ implementation:
                 loss_curve_csv=args.loss_curve_csv,
             )
 
-            # Build a compact schema JSON
+            # Compact schema JSON
             try:
                 with open(args.training_report, "r", encoding="utf-8") as f:
                     report = json.load(f)
@@ -233,19 +214,10 @@ implementation:
             with open(args.schema_output, "w", encoding="utf-8") as f:
                 json.dump(schema, f, indent=2)
 
-            print("[DONE] Training complete.")
-            print(f"[INFO] best:   {args.best_weights}")
-            print(f"[INFO] final:  {args.final_weights}")
-            print(f"[INFO] report: {args.training_report}")
-            print(f"[INFO] curve:  {args.loss_curve_csv}")
-            print(f"[INFO] code:   {args.model_py_out}")
-            print(f"[INFO] schema: {args.schema_output}")
-
         if __name__ == "__main__":
             main()
         PY
 
-        # Execute with the exact argv KFP provided
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
     args:
       - --tokenizer-json
