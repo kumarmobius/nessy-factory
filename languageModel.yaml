@@ -1,4 +1,4 @@
-name: Build LanguageModel
+name: Build LanguageModell
 description: Uses nesy-factory builders to create an untrained model from a tokenizer and layer pattern; saves weights, config, model code, and a schema summary.
 
 inputs:
@@ -22,17 +22,18 @@ outputs:
   - name: model_py
     type: Data
   - name: schema_json
-    type: Data
+    type: Data   # <-- keep Data if downstream expects a file artifact
 
 implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v21
     command:
       - bash
-      - -eu
+      - -eux
       - -c
       - |-
         set -o pipefail
+        echo "[DEBUG] argv from shell: $@"
 
         cat >/tmp/build_model.py <<'PY'
         import argparse, json, os, sys
@@ -48,6 +49,12 @@ implementation:
           ap.add_argument("--model-py", required=True)
           ap.add_argument("--schema-json", required=True)
           args = ap.parse_args()
+
+          # --- Debug prints + basic validation ---
+          print("[DEBUG] sys.argv:", sys.argv)
+          print("[DEBUG] parsed args:", json.dumps(vars(args), indent=2))
+          if not os.path.exists(args.tokenizer_json):
+            raise FileNotFoundError(f"--tokenizer-json not found: {args.tokenizer_json}")
 
           model_lower = str(args.model).strip().lower()
 
@@ -79,13 +86,12 @@ implementation:
             print(json.dumps({"import_errors": import_errors}, indent=2), file=sys.stderr)
             sys.exit(3)
 
-          # Ensure output directories exist (builders also handle it, but safe here)
+          # Ensure output directories exist (extra safety)
           for p in (args.model_weights, args.model_config, args.model_py, args.schema_json):
             d = os.path.dirname(p)
             if d:
               os.makedirs(d, exist_ok=True)
 
-          # Run the selected builder
           print(f"[INFO] Using builder: {chosen}")
           summary = builder.run(
             tokenizer_json=args.tokenizer_json,
@@ -125,7 +131,12 @@ implementation:
         if __name__ == "__main__":
           main()
         PY
+
+        # IMPORTANT: forward CLI args so argparse sees them
         python3 -u /tmp/build_model.py "$@"
+
+        echo "[DEBUG] outputs tree:"
+        ls -R /tmp/outputs || true
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
