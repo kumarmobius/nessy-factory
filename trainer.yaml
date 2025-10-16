@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -90,7 +90,6 @@ implementation:
         from pathlib import Path
 
         def find_model_py_file(path_str: str) -> str:
-            """Accept either a file or a directory; if directory, pick the first .py file."""
             p = Path(path_str)
             if p.is_file():
                 return str(p)
