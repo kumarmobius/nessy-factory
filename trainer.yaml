@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad-accum, and best/final checkpoints.
 
 inputs:
@@ -76,10 +76,37 @@ implementation:
     image: gurpreetgandhi/nesy-factory:v21
     command:
       - bash
-      - -eu
+      - -eux
       - -c
       - |-
         set -o pipefail
+        echo "[DEBUG] raw argv from engine: $@"
+
+        # ---- positional -> flag shim (handles up to 5 leading inputs) ----
+        # Expected positional order (if runner passes plain paths):
+        #   1) tokenizer_json, 2) train_corpus, 3) model_config, 4) model_weights, 5) model_py_in
+        mapfile -t _argv < <(printf '%s\n' "$@")
+        _new=()
+        _expect=(--tokenizer-json --train-corpus --model-config --model-weights --model-py-in)
+        _i=0
+        while (( _i < ${#_argv[@]} && _i < ${#_expect[@]} )); do
+          a="${_argv[_i]}"
+          if [[ "${a#-}" = "$a" ]]; then  # doesn't start with '-': treat as positional
+            echo "[WARN] Positional arg detected for ${_expect[_i]}: ${a}"
+            _new+=( "${_expect[_i]}" "${a}" )
+            unset '_argv[_i]'
+            (( _i++ ))
+          else
+            break
+          fi
+        done
+        # Append the rest (already flagged args)
+        for a in "${_argv[@]}"; do
+          [[ -n "${a+x}" ]] && _new+=( "$a" )
+        done
+        set -- "${_new[@]}"
+        echo "[DEBUG] argv after shim: $@"
+        # -------------------------------------------------------------------
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, sys
@@ -116,53 +143,50 @@ implementation:
           ap.add_argument("--schema-output", required=True)
           args = ap.parse_args()
 
-          # Imports kept inside container
           from nesy_factory.language_model.train import GemmaTrainer
 
           # Ensure output dirs exist
-          for p in (args.best_weights, args.final_weights, args.training_report, args.loss_curve_csv, args.model_py_out, args.schema_output):
+          for p in (args.best_weights, args.final_weights, args.training_report,
+                    args.loss_curve_csv, args.model_py_out, args.schema_output):
             d = os.path.dirname(p)
             if d:
               os.makedirs(d, exist_ok=True)
 
-          # Quick existence checks (helpful diagnostics)
           print("Pre-train existence checks:")
           print(" - tokenizer_json exists:", Path(args.tokenizer_json).exists())
-          print(" - train_corpus exists:", Path(args.train_corpus).exists())
-          print(" - model_config exists:", Path(args.model_config).exists())
-          print(" - model_weights exists:", Path(args.model_weights).exists())
-          print(" - model_py_in exists:", Path(args.model_py_in).exists())
+          print(" - train_corpus exists:",   Path(args.train_corpus).exists())
+          print(" - model_config exists:",   Path(args.model_config).exists())
+          print(" - model_weights exists:",  Path(args.model_weights).exists())
+          print(" - model_py_in exists:",    Path(args.model_py_in).exists())
 
-          # Run the trainer (works for Gemma AND GPT-NeoX-as-Gemma because of the alias)
           trainer = GemmaTrainer()
           trainer.run(
-              tokenizer_json=args.tokenizer_json,
-              train_corpus=args.train_corpus,
-              model_config=args.model_config,
-              model_weights=args.model_weights,
-              model_py_in=args.model_py_in,
-              model_py_out=args.model_py_out,
-              learning_rate=args.learning_rate,
-              min_lr=args.min_lr,
-              warmup_steps=args.warmup_steps,
-              max_iters=args.max_iters,
-              batch_size=args.batch_size,
-              block_size=args.block_size,
-              grad_accum=args.grad_accum,
-              eval_interval=args.eval_interval,
-              eval_iters=args.eval_iters,
-              weight_decay=args.weight_decay,
-              beta2=args.beta2,
-              clip_grad_norm=args.clip_grad_norm,
-              val_fraction=args.val_fraction,
-              num_proc=args.num_proc,
-              best_weights=args.best_weights,
-              final_weights=args.final_weights,
-              training_report=args.training_report,
-              loss_curve_csv=args.loss_curve_csv,
+            tokenizer_json=args.tokenizer_json,
+            train_corpus=args.train_corpus,
+            model_config=args.model_config,
+            model_weights=args.model_weights,
+            model_py_in=args.model_py_in,
+            model_py_out=args.model_py_out,
+            learning_rate=args.learning_rate,
+            min_lr=args.min_lr,
+            warmup_steps=args.warmup_steps,
+            max_iters=args.max_iters,
+            batch_size=args.batch_size,
+            block_size=args.block_size,
+            grad_accum=args.grad_accum,
+            eval_interval=args.eval_interval,
+            eval_iters=args.eval_iters,
+            weight_decay=args.weight_decay,
+            beta2=args.beta2,
+            clip_grad_norm=args.clip_grad_norm,
+            val_fraction=args.val_fraction,
+            num_proc=args.num_proc,
+            best_weights=args.best_weights,
+            final_weights=args.final_weights,
+            training_report=args.training_report,
+            loss_curve_csv=args.loss_curve_csv,
           )
 
-          # Build a compact schema summary (merge hyperparams + trainer report)
           try:
             with open(args.training_report, "r", encoding="utf-8") as f:
               rep = json.load(f)
@@ -219,6 +243,7 @@ implementation:
         PY
 
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
+        echo "[DEBUG] outputs tree:"; ls -R /tmp/outputs || true
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
