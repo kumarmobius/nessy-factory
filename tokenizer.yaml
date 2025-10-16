@@ -1,18 +1,18 @@
-name: Tokenizer
-description: Trains a byte-level BPE tokenizer using nesy_factory.language_model.tokenizer.ByteLevelBPETokenizer and emits tokenizer.json, training_report.json, and a flat schema.json.
+name: Train Byte-Level BPE Tokenizer (NESY v21)
+description: Trains a byte-level BPE tokenizer on a newline-delimited text corpus using nesy-factory’s ByteLevelBPETokenizer.
 
 inputs:
   - name: train_corpus
     type: Data
   - name: vocab_size
     type: Integer
-    default: "32000"
+    default: 32000
   - name: min_frequency
     type: Integer
-    default: "2"
+    default: 2
   - name: add_bos_eos
     type: String
-    default: "true"     # "true"/"false"
+    default: "true"          # "true"/"false" (parsed inside the script)
   - name: special_tokens
     type: String
     default: "[PAD],[UNK],[BOS],[EOS]"
@@ -30,44 +30,52 @@ implementation:
     image: gurpreetgandhi/nesy-factory:v21
     command:
       - bash
-      - -ec
+      - -eu
+      - -c
       - |-
         set -o pipefail
 
+        # write a tiny wrapper that calls nesy-factory's ByteLevelBPETokenizer
         cat >/tmp/train_tokenizer_nesy_v21.py <<'PY'
         import argparse, json, os, sys
 
-        # Import from your Docker image's library (v21 layout)
+        # Try both module paths (some builds export it under tokenize.py, others as tokenizer.py)
+        TokenizerClass = None
+        import_errors = {}
         try:
-            from nesy_factory.language_model.tokenizer import ByteLevelBPETokenizer
+            from nesy_factory.language_model.tokenize import ByteLevelBPETokenizer as _Tok
+            TokenizerClass = _Tok
         except Exception as e:
-            print(f"[FATAL] Could not import ByteLevelBPETokenizer: {e}", file=sys.stderr)
-            sys.exit(1)
+            import_errors["nesy_factory.language_model.tokenize"] = str(e)
+            try:
+                from nesy_factory.language_model.tokenizer import ByteLevelBPETokenizer as _Tok2
+                TokenizerClass = _Tok2
+            except Exception as e2:
+                import_errors["nesy_factory.language_model.tokenizer"] = str(e2)
 
-        # ---------- flat schema builder (merged inputs + effective config) ----------
-        def build_flat_schema(a, specials_parsed, add_bos_eos_resolved, report):
+        def parse_bool(v: str) -> bool:
+            return str(v).strip().lower() in ("true", "1", "yes", "y")
+
+        def build_flat_schema(a, specials_parsed, add_bos_eos_resolved, actual_vocab_size=None):
             schema = {
-                # user-provided/resolved inputs (as-key-values)
                 "train_corpus": a.train_corpus,
-                "vocab_size": a.vocab_size,              # raw input value the user set
+                "vocab_size": a.vocab_size,
                 "min_frequency": a.min_frequency,
-                "add_bos_eos": a.add_bos_eos,            # raw input string
+                "add_bos_eos": a.add_bos_eos,          # raw input string
                 "special_tokens": a.special_tokens,
 
-                # effective config (merged here, not nested)
+                # effective config (flat)
                 "model_type": "BPE",
                 "pre_tokenizer": "ByteLevel",
                 "decoder": "ByteLevel",
                 "unk_token": "[UNK]",
                 "special_tokens_parsed": specials_parsed,
                 "add_bos_eos_resolved": add_bos_eos_resolved,
-                "target_vocab_size": a.vocab_size,       # renamed field for config
+                "target_vocab_size": a.vocab_size,
             }
-            # Include actual vocab size from report if present
-            if isinstance(report, dict) and "actual_vocab_size" in report:
-                schema["actual_vocab_size"] = int(report["actual_vocab_size"])
+            if actual_vocab_size is not None:
+                schema["actual_vocab_size"] = actual_vocab_size
             return schema
-        # ---------------------------------------------------------------------------
 
         def main():
             ap = argparse.ArgumentParser()
@@ -81,18 +89,29 @@ implementation:
             ap.add_argument("--schema-output", required=True)
             a = ap.parse_args()
 
-            specials = [s.strip() for s in a.special_tokens.split(",") if s.strip()]
-            add_bos_eos_flag = str(a.add_bos_eos).strip().lower() in ("true","1","yes","y")
+            # Fail fast if class couldn't be imported
+            if TokenizerClass is None:
+                err = {
+                    "status": "error",
+                    "error": "ByteLevelBPETokenizer could not be imported from nesy_factory.",
+                    "import_errors": import_errors,
+                }
+                os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
+                with open(a.training_report, "w", encoding="utf-8") as f:
+                    json.dump(err, f, indent=2)
+                print("[FATAL] ByteLevelBPETokenizer import failed. See training_report for details.", file=sys.stderr)
+                sys.exit(1)
 
-            print(f"[INFO] Training tokenizer (v21) on {a.train_corpus}")
+            specials = [s.strip() for s in (a.special_tokens or "").split(",") if s.strip()]
+            add_bos_eos_flag = parse_bool(a.add_bos_eos)
+
+            print(f"[INFO] Training tokenizer (nesy-factory) on {a.train_corpus}")
             print(f"[INFO] Target vocab size: {a.vocab_size}")
             print(f"[INFO] Min frequency: {a.min_frequency}")
             print(f"[INFO] Special tokens: {specials}")
             print(f"[INFO] Add BOS/EOS: {add_bos_eos_flag}")
 
-            tok = ByteLevelBPETokenizer()
-
-            # Train via your class
+            tok = TokenizerClass()
             report = tok.run(
                 text_file=a.train_corpus,
                 vocab_size=a.vocab_size,
@@ -101,21 +120,21 @@ implementation:
                 add_bos_eos=add_bos_eos_flag,
             )
 
-            # Save tokenizer JSON using the class' save method
+            # Save tokenizer JSON through the class API
             os.makedirs(os.path.dirname(a.tokenizer_json) or ".", exist_ok=True)
             tok.save(a.tokenizer_json)
 
-            # Write training_report.json (whatever the class returned)
+            # Save training report (dict returned by tok.run)
             os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
             with open(a.training_report, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
 
-            # Write schema.json (flat, merged)
+            # Save a flat schema JSON to mirror your earlier brick’s output shape
             schema_flat = build_flat_schema(
                 a,
                 specials_parsed=specials,
                 add_bos_eos_resolved=add_bos_eos_flag,
-                report=report
+                actual_vocab_size=report.get("actual_vocab_size"),
             )
             os.makedirs(os.path.dirname(a.schema_output) or ".", exist_ok=True)
             with open(a.schema_output, "w", encoding="utf-8") as f:
@@ -124,13 +143,14 @@ implementation:
             print(f"[SUCCESS] Tokenizer saved to {a.tokenizer_json}")
             print(f"[SUCCESS] Training report saved to {a.training_report}")
             print(f"[SUCCESS] Schema JSON saved to {a.schema_output}")
-            print(f"[INFO] Final vocab size: {report.get('actual_vocab_size', 'N/A')}")
-
+            print(f"[INFO] Final vocab size: {report.get('actual_vocab_size')}")
+        
         if __name__ == "__main__":
             main()
         PY
 
-        python3 -u /tmp/train_tokenizer_nesy_v21.py "$0" "$@"
+        # run the helper with all CLI args the brick passes
+        python3 -u /tmp/train_tokenizer_nesy_v21.py "$@"
     args:
       - --train-corpus
       - {inputPath: train_corpus}
