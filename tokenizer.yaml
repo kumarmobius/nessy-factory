@@ -1,0 +1,150 @@
+name: Tokenizer
+description: Trains a byte-level BPE tokenizer using nesy_factory.language_model.tokenizer.ByteLevelBPETokenizer and emits tokenizer.json, training_report.json, and a flat schema.json.
+
+inputs:
+  - name: train_corpus
+    type: Data
+  - name: vocab_size
+    type: Integer
+    default: "32000"
+  - name: min_frequency
+    type: Integer
+    default: "2"
+  - name: add_bos_eos
+    type: String
+    default: "true"     # "true"/"false"
+  - name: special_tokens
+    type: String
+    default: "[PAD],[UNK],[BOS],[EOS]"
+
+outputs:
+  - name: tokenizer_json
+    type: Model
+  - name: training_report
+    type: Data
+  - name: schema_json
+    type: Data
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v21
+    command:
+      - bash
+      - -ec
+      - |-
+        set -o pipefail
+
+        cat >/tmp/train_tokenizer_nesy_v21.py <<'PY'
+        import argparse, json, os, sys
+
+        # Import from your Docker image's library (v21 layout)
+        try:
+            from nesy_factory.language_model.tokenizer import ByteLevelBPETokenizer
+        except Exception as e:
+            print(f"[FATAL] Could not import ByteLevelBPETokenizer: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # ---------- flat schema builder (merged inputs + effective config) ----------
+        def build_flat_schema(a, specials_parsed, add_bos_eos_resolved, report):
+            schema = {
+                # user-provided/resolved inputs (as-key-values)
+                "train_corpus": a.train_corpus,
+                "vocab_size": a.vocab_size,              # raw input value the user set
+                "min_frequency": a.min_frequency,
+                "add_bos_eos": a.add_bos_eos,            # raw input string
+                "special_tokens": a.special_tokens,
+
+                # effective config (merged here, not nested)
+                "model_type": "BPE",
+                "pre_tokenizer": "ByteLevel",
+                "decoder": "ByteLevel",
+                "unk_token": "[UNK]",
+                "special_tokens_parsed": specials_parsed,
+                "add_bos_eos_resolved": add_bos_eos_resolved,
+                "target_vocab_size": a.vocab_size,       # renamed field for config
+            }
+            # Include actual vocab size from report if present
+            if isinstance(report, dict) and "actual_vocab_size" in report:
+                schema["actual_vocab_size"] = int(report["actual_vocab_size"])
+            return schema
+        # ---------------------------------------------------------------------------
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--train-corpus", required=True)
+            ap.add_argument("--vocab-size", type=int, default=32000)
+            ap.add_argument("--min-frequency", type=int, default=2)
+            ap.add_argument("--special-tokens", default="[PAD],[UNK],[BOS],[EOS]")
+            ap.add_argument("--add-bos-eos", default="true")
+            ap.add_argument("--tokenizer-json", required=True)
+            ap.add_argument("--training-report", required=True)
+            ap.add_argument("--schema-output", required=True)
+            a = ap.parse_args()
+
+            specials = [s.strip() for s in a.special_tokens.split(",") if s.strip()]
+            add_bos_eos_flag = str(a.add_bos_eos).strip().lower() in ("true","1","yes","y")
+
+            print(f"[INFO] Training tokenizer (v21) on {a.train_corpus}")
+            print(f"[INFO] Target vocab size: {a.vocab_size}")
+            print(f"[INFO] Min frequency: {a.min_frequency}")
+            print(f"[INFO] Special tokens: {specials}")
+            print(f"[INFO] Add BOS/EOS: {add_bos_eos_flag}")
+
+            tok = ByteLevelBPETokenizer()
+
+            # Train via your class
+            report = tok.run(
+                text_file=a.train_corpus,
+                vocab_size=a.vocab_size,
+                min_frequency=a.min_frequency,
+                special_tokens=a.special_tokens,
+                add_bos_eos=add_bos_eos_flag,
+            )
+
+            # Save tokenizer JSON using the class' save method
+            os.makedirs(os.path.dirname(a.tokenizer_json) or ".", exist_ok=True)
+            tok.save(a.tokenizer_json)
+
+            # Write training_report.json (whatever the class returned)
+            os.makedirs(os.path.dirname(a.training_report) or ".", exist_ok=True)
+            with open(a.training_report, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+
+            # Write schema.json (flat, merged)
+            schema_flat = build_flat_schema(
+                a,
+                specials_parsed=specials,
+                add_bos_eos_resolved=add_bos_eos_flag,
+                report=report
+            )
+            os.makedirs(os.path.dirname(a.schema_output) or ".", exist_ok=True)
+            with open(a.schema_output, "w", encoding="utf-8") as f:
+                json.dump(schema_flat, f, indent=2)
+
+            print(f"[SUCCESS] Tokenizer saved to {a.tokenizer_json}")
+            print(f"[SUCCESS] Training report saved to {a.training_report}")
+            print(f"[SUCCESS] Schema JSON saved to {a.schema_output}")
+            print(f"[INFO] Final vocab size: {report.get('actual_vocab_size', 'N/A')}")
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python3 -u /tmp/train_tokenizer_nesy_v21.py "$0" "$@"
+    args:
+      - --train-corpus
+      - {inputPath: train_corpus}
+      - --vocab-size
+      - {inputValue: vocab_size}
+      - --min-frequency
+      - {inputValue: min_frequency}
+      - --special-tokens
+      - {inputValue: special_tokens}
+      - --add-bos-eos
+      - {inputValue: add_bos_eos}
+      - --tokenizer-json
+      - {outputPath: tokenizer_json}
+      - --training-report
+      - {outputPath: training_report}
+      - --schema-output
+      - {outputPath: schema_json}
