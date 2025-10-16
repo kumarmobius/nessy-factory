@@ -161,7 +161,7 @@ implementation:
             model_config=args.model_config,
             model_weights=args.model_weights,
             model_py_in=args.model_py_in,
-            model_py_out=args.model_p y_out,
+            model_py_out=args.model_py_out,
             learning_rate=args.learning_rate,
             min_lr=args.min_lr,
             warmup_steps=args.warmup_steps,
