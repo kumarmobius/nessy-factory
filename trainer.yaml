@@ -1,4 +1,4 @@
-name: LM Trainerr
+name: LM Trainer
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -81,12 +81,29 @@ implementation:
       - |-
         set -o pipefail
 
-        # Write wrapper script
+        # Show what bash thinks the args are (useful if something upstream strips them)
+        echo "[DEBUG] shell received args: $*"
+
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, shutil, sys
         from pathlib import Path
 
-        def pick_model_py(path_str: str) -> str:
+        # Standard KFP artifact mount points (when using {inputPath: ...})
+        DEFAULTS = {
+            "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
+            "train_corpus":   "/tmp/inputs/train_corpus/data",
+            "model_config":   "/tmp/inputs/model_config/data",
+            "model_weights":  "/tmp/inputs/model_weights/data",
+            "model_py_in":    "/tmp/inputs/model_py_in/data",
+            "best_weights":   "/tmp/outputs/best_weights/data",
+            "final_weights":  "/tmp/outputs/final_weights/data",
+            "training_report":"/tmp/outputs/training_report/data",
+            "loss_curve_csv": "/tmp/outputs/loss_curve_csv/data",
+            "model_py_out":   "/tmp/outputs/model_py/data",
+            "schema_output":  "/tmp/outputs/schema_json/data",
+        }
+
+        def _pick_model_py(path_str: str) -> str:
             p = Path(path_str)
             if p.is_file():
                 return str(p)
@@ -97,17 +114,19 @@ implementation:
                     return str(cand)
             raise FileNotFoundError(f"No .py file under directory: {p}")
 
+        def _exist(p): return Path(p).exists()
+
         def main():
-            # Help debug missing flags: print argv exactly as Python sees it
             print("[DEBUG] sys.argv:", sys.argv, flush=True)
 
             ap = argparse.ArgumentParser()
-            ap.add_argument("--tokenizer-json", required=True)
-            ap.add_argument("--train-corpus", required=True)
-            ap.add_argument("--model-config", required=True)
-            ap.add_argument("--model-weights", required=True)
-            ap.add_argument("--model-py-in", required=True)
-            ap.add_argument("--model-py-out", required=True)
+            # Make inputs OPTIONAL, then fallback to default KFP mount paths if missing.
+            ap.add_argument("--tokenizer-json", default=None)
+            ap.add_argument("--train-corpus",   default=None)
+            ap.add_argument("--model-config",   default=None)
+            ap.add_argument("--model-weights",  default=None)
+            ap.add_argument("--model-py-in",    default=None)
+            ap.add_argument("--model-py-out",   default=None)
 
             ap.add_argument("--learning-rate", type=float, required=True)
             ap.add_argument("--min-lr", type=float, required=True)
@@ -124,36 +143,46 @@ implementation:
             ap.add_argument("--val-fraction", type=float, required=True)
             ap.add_argument("--num-proc", type=int, required=True)
 
-            ap.add_argument("--best-weights", required=True)
-            ap.add_argument("--final-weights", required=True)
-            ap.add_argument("--training-report", required=True)
-            ap.add_argument("--loss-curve-csv", required=True)
-            ap.add_argument("--schema-output", required=True)
+            ap.add_argument("--best-weights",   default=None)
+            ap.add_argument("--final-weights",  default=None)
+            ap.add_argument("--training-report",default=None)
+            ap.add_argument("--loss-curve-csv", default=None)
+            ap.add_argument("--schema-output",  default=None)
             args = ap.parse_args()
+
+            # Fallbacks for missing paths
+            for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
+                      "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
+                if getattr(args, k.replace("-", "_")) in (None, ""):
+                    setattr(args, k.replace("-", "_"), DEFAULTS[k])
+
+            print("[DEBUG] resolved paths:")
+            for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
+                      "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
+                v = getattr(args, k.replace("-", "_"))
+                print(f"  {k:16s} -> {v} (exists={_exist(v)})")
 
             from nesy_factory.language_model.train import GemmaTrainer
 
             # Ensure output dirs exist
-            for p in (
-                args.best_weights, args.final_weights, args.training_report,
-                args.loss_curve_csv, args.model_py_out, args.schema_output
-            ):
+            for p in (args.best_weights, args.final_weights, args.training_report,
+                      args.loss_curve_csv, args.model_py_out, args.schema_output):
                 d = os.path.dirname(p)
                 if d:
                     os.makedirs(d, exist_ok=True)
 
-            # Copy/normalize model code path
-            src_py = pick_model_py(args.model_py_in)
+            # Normalize/copy model code
+            src_py = _pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, args.model_py_out)
 
-            # Sanity checks
+            # Debug existence before invoking trainer
             print("Pre-train existence checks:")
-            print(" - tokenizer_json:", Path(args.tokenizer_json).exists())
-            print(" - train_corpus  :", Path(args.train_corpus).exists())
-            print(" - model_config  :", Path(args.model_config).exists())
-            print(" - model_weights :", Path(args.model_weights).exists())
-            print(" - model_py_in   :", Path(args.model_py_in).exists())
-            print(" - model_py_out  :", Path(args.model_py_out).exists())
+            print(" - tokenizer_json:", _exist(args.tokenizer_json))
+            print(" - train_corpus  :", _exist(args.train_corpus))
+            print(" - model_config  :", _exist(args.model_config))
+            print(" - model_weights :", _exist(args.model_weights))
+            print(" - model_py_in   :", _exist(args.model_py_in))
+            print(" - model_py_out  :", _exist(args.model_py_out))
 
             # Train
             trainer = GemmaTrainer()
@@ -162,7 +191,7 @@ implementation:
                 train_corpus=args.train_corpus,
                 model_config=args.model_config,
                 model_weights=args.model_weights,
-                model_py_in=args.model_py_out,   # use the copied file
+                model_py_in=args.model_py_out,  # use the copied file
                 model_py_out=args.model_py_out,
                 learning_rate=args.learning_rate,
                 min_lr=args.min_lr,
@@ -233,7 +262,7 @@ implementation:
             main()
         PY
 
-        # Run wrapper with all flags handed in by KFP via args:
+        # Hand through all KFP-supplied args to the wrapper.
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
     args:
       - --tokenizer-json
