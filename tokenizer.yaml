@@ -6,7 +6,7 @@ inputs:
     type: Data
   - name: vocab_size
     type: Integer
-    default: 32000
+    default: "32000"
   - name: min_frequency
     type: Integer
     default: "2"
