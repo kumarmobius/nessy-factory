@@ -1,4 +1,4 @@
-name: LM Trainerr
+name: LM Trainer
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad-accum, and best/final checkpoints.
 
 inputs:
@@ -76,43 +76,31 @@ implementation:
     image: gurpreetgandhi/nesy-factory:v21
     command:
       - bash
-      - -eux
+      - -eu
       - -c
       - |-
         set -o pipefail
-        echo "[DEBUG] raw argv from engine: $@"
-
-        # ---- positional -> flag shim (handles up to 5 leading inputs) ----
-        # Expected positional order (if runner passes plain paths):
-        #   1) tokenizer_json, 2) train_corpus, 3) model_config, 4) model_weights, 5) model_py_in
-        mapfile -t _argv < <(printf '%s\n' "$@")
-        _new=()
-        _expect=(--tokenizer-json --train-corpus --model-config --model-weights --model-py-in)
-        _i=0
-        while (( _i < ${#_argv[@]} && _i < ${#_expect[@]} )); do
-          a="${_argv[_i]}"
-          if [[ "${a#-}" = "$a" ]]; then  # doesn't start with '-': treat as positional
-            echo "[WARN] Positional arg detected for ${_expect[_i]}: ${a}"
-            _new+=( "${_expect[_i]}" "${a}" )
-            unset '_argv[_i]'
-            (( _i++ ))
-          else
-            break
-          fi
-        done
-        # Append the rest (already flagged args)
-        for a in "${_argv[@]}"; do
-          [[ -n "${a+x}" ]] && _new+=( "$a" )
-        done
-        set -- "${_new[@]}"
-        echo "[DEBUG] argv after shim: $@"
-        # -------------------------------------------------------------------
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, sys
         from pathlib import Path
 
+        # ---- positional→flag normalizer (Python-side; avoids bash gotchas) ----
+        def normalize_argv(argv):
+          expected = ["--tokenizer-json", "--train-corpus", "--model-config", "--model-weights", "--model-py-in"]
+          out = []
+          i = 0
+          for a in argv:
+            if not a.startswith("-") and i < len(expected):
+              out.extend([expected[i], a])
+              i += 1
+            else:
+              out.append(a)
+          return out
+        # ----------------------------------------------------------------------
+
         def main():
+          # Build parser but DON'T parse yet
           ap = argparse.ArgumentParser()
           ap.add_argument("--tokenizer-json", required=True)
           ap.add_argument("--train-corpus", required=True)
@@ -141,8 +129,13 @@ implementation:
           ap.add_argument("--training-report", required=True)
           ap.add_argument("--loss-curve-csv", required=True)
           ap.add_argument("--schema-output", required=True)
-          args = ap.parse_args()
 
+          # Normalize argv to tolerate positional inputs
+          argv = normalize_argv(sys.argv[1:])
+          print("[DEBUG] argv after normalize:", " ".join(argv))
+          args = ap.parse_args(argv)
+
+          # Imports kept inside container
           from nesy_factory.language_model.train import GemmaTrainer
 
           # Ensure output dirs exist
@@ -152,6 +145,7 @@ implementation:
             if d:
               os.makedirs(d, exist_ok=True)
 
+          # Quick existence checks
           print("Pre-train existence checks:")
           print(" - tokenizer_json exists:", Path(args.tokenizer_json).exists())
           print(" - train_corpus exists:",   Path(args.train_corpus).exists())
@@ -159,6 +153,7 @@ implementation:
           print(" - model_weights exists:",  Path(args.model_weights).exists())
           print(" - model_py_in exists:",    Path(args.model_py_in).exists())
 
+          # Run trainer
           trainer = GemmaTrainer()
           trainer.run(
             tokenizer_json=args.tokenizer_json,
@@ -166,7 +161,7 @@ implementation:
             model_config=args.model_config,
             model_weights=args.model_weights,
             model_py_in=args.model_py_in,
-            model_py_out=args.model_py_out,
+            model_py_out=args.model_p y_out,
             learning_rate=args.learning_rate,
             min_lr=args.min_lr,
             warmup_steps=args.warmup_steps,
@@ -187,6 +182,7 @@ implementation:
             loss_curve_csv=args.loss_curve_csv,
           )
 
+          # Summarize outputs
           try:
             with open(args.training_report, "r", encoding="utf-8") as f:
               rep = json.load(f)
@@ -243,7 +239,6 @@ implementation:
         PY
 
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
-        echo "[DEBUG] outputs tree:"; ls -R /tmp/outputs || true
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
