@@ -1,4 +1,4 @@
-name: Build LanguageModell
+name: Build LanguageModel
 description: Uses nesy-factory builders to create an untrained model from a tokenizer and layer pattern; saves weights, config, model code, and a schema summary.
 
 inputs:
@@ -22,7 +22,7 @@ outputs:
   - name: model_py
     type: Data
   - name: schema_json
-    type: Data   # <-- keep Data if downstream expects a file artifact
+    type: Data
 
 implementation:
   container:
@@ -33,7 +33,15 @@ implementation:
       - -c
       - |-
         set -o pipefail
-        echo "[DEBUG] argv from shell: $@"
+        echo "[DEBUG] raw argv from engine: $@"
+
+        # ---- shim: some engines inject the first input as a positional arg ----
+        if [[ "${1-}" != "" && "${1#-}" = "$1" ]]; then
+          echo "[WARN] First arg appears positional: $1 ; injecting --tokenizer-json"
+          set -- --tokenizer-json "$1" "${@:2}"
+        fi
+        echo "[DEBUG] argv after shim: $@"
+        # -----------------------------------------------------------------------
 
         cat >/tmp/build_model.py <<'PY'
         import argparse, json, os, sys
@@ -50,31 +58,26 @@ implementation:
           ap.add_argument("--schema-json", required=True)
           args = ap.parse_args()
 
-          # --- Debug prints + basic validation ---
-          print("[DEBUG] sys.argv:", sys.argv)
           print("[DEBUG] parsed args:", json.dumps(vars(args), indent=2))
+
           if not os.path.exists(args.tokenizer_json):
             raise FileNotFoundError(f"--tokenizer-json not found: {args.tokenizer_json}")
 
-          model_lower = str(args.model).strip().lower()
-
-          # Pick the builder
           builder = None
           chosen = None
           import_errors = {}
 
-          if model_lower in ("gemma", "gemma3", "gemma3_builder"):
+          mdl = str(args.model).strip().lower()
+          if mdl in ("gemma", "gemma3", "gemma3_builder"):
             try:
               from nesy_factory.language_model.gemma import Gemma3Builder
-              builder = Gemma3Builder()
-              chosen = "gemma"
+              builder, chosen = Gemma3Builder(), "gemma"
             except Exception as e:
               import_errors["gemma"] = repr(e)
-          elif model_lower in ("gptneox", "neo", "neox"):
+          elif mdl in ("gptneox", "neo", "neox"):
             try:
               from nesy_factory.language_model.gptneox import GPTNeoXBuilder
-              builder = GPTNeoXBuilder()
-              chosen = "gptneox"
+              builder, chosen = GPTNeoXBuilder(), "gptneox"
             except Exception as e:
               import_errors["gptneox"] = repr(e)
           else:
@@ -86,11 +89,9 @@ implementation:
             print(json.dumps({"import_errors": import_errors}, indent=2), file=sys.stderr)
             sys.exit(3)
 
-          # Ensure output directories exist (extra safety)
           for p in (args.model_weights, args.model_config, args.model_py, args.schema_json):
             d = os.path.dirname(p)
-            if d:
-              os.makedirs(d, exist_ok=True)
+            if d: os.makedirs(d, exist_ok=True)
 
           print(f"[INFO] Using builder: {chosen}")
           summary = builder.run(
@@ -101,11 +102,9 @@ implementation:
             model_config_out=args.model_config,
             model_py_out=args.model_py,
           )
-
           print("[INFO] Builder summary:")
           print(json.dumps(summary, indent=2))
 
-          # Minimal schema summary (inputs + builder summary)
           schema = {
             "model": chosen,
             "inputs": {
@@ -132,11 +131,8 @@ implementation:
           main()
         PY
 
-        # IMPORTANT: forward CLI args so argparse sees them
         python3 -u /tmp/build_model.py "$@"
-
-        echo "[DEBUG] outputs tree:"
-        ls -R /tmp/outputs || true
+        echo "[DEBUG] outputs tree:"; ls -R /tmp/outputs || true
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
