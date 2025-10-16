@@ -9,7 +9,7 @@ inputs:
     default: 32000
   - name: min_frequency
     type: Integer
-    default: 2
+    default: "2"
   - name: add_bos_eos
     type: String
     default: "true"          # "true"/"false" (parsed inside the script)
