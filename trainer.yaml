@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -81,8 +81,9 @@ implementation:
       - |-
         set -o pipefail
 
+        # Write wrapper script
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
-        import argparse, json, os, shutil
+        import argparse, json, os, shutil, sys
         from pathlib import Path
 
         def pick_model_py(path_str: str) -> str:
@@ -97,6 +98,9 @@ implementation:
             raise FileNotFoundError(f"No .py file under directory: {p}")
 
         def main():
+            # Help debug missing flags: print argv exactly as Python sees it
+            print("[DEBUG] sys.argv:", sys.argv, flush=True)
+
             ap = argparse.ArgumentParser()
             ap.add_argument("--tokenizer-json", required=True)
             ap.add_argument("--train-corpus", required=True)
@@ -138,9 +142,18 @@ implementation:
                 if d:
                     os.makedirs(d, exist_ok=True)
 
-            # Choose/copy model code to the output path
+            # Copy/normalize model code path
             src_py = pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, args.model_py_out)
+
+            # Sanity checks
+            print("Pre-train existence checks:")
+            print(" - tokenizer_json:", Path(args.tokenizer_json).exists())
+            print(" - train_corpus  :", Path(args.train_corpus).exists())
+            print(" - model_config  :", Path(args.model_config).exists())
+            print(" - model_weights :", Path(args.model_weights).exists())
+            print(" - model_py_in   :", Path(args.model_py_in).exists())
+            print(" - model_py_out  :", Path(args.model_py_out).exists())
 
             # Train
             trainer = GemmaTrainer()
@@ -171,12 +184,12 @@ implementation:
                 loss_curve_csv=args.loss_curve_csv,
             )
 
-            # Compact schema JSON
+            # Compact schema
             try:
                 with open(args.training_report, "r", encoding="utf-8") as f:
-                    report = json.load(f)
+                    rep = json.load(f)
             except Exception as e:
-                report = {"error": f"failed_to_read_training_report: {e!r}"}
+                rep = {"error_loading_training_report": repr(e)}
 
             schema = {
                 "inputs": {
@@ -209,15 +222,18 @@ implementation:
                     "loss_curve_csv": args.loss_curve_csv,
                     "model_py": args.model_py_out,
                 },
-                "trainer_report": report,
+                "trainer_report": rep,
             }
             with open(args.schema_output, "w", encoding="utf-8") as f:
                 json.dump(schema, f, indent=2)
+
+            print("[DONE] Training complete.")
 
         if __name__ == "__main__":
             main()
         PY
 
+        # Run wrapper with all flags handed in by KFP via args:
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
     args:
       - --tokenizer-json
