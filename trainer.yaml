@@ -264,6 +264,7 @@ implementation:
 
         # Hand through all KFP-supplied args to the wrapper.
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
+      - _
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
