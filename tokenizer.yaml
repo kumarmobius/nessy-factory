@@ -124,7 +124,7 @@ implementation:
         if __name__ == "__main__":
             main()
         PY
-        python3 -u /tmp/train_tokenizer_nesy_v21.py "$@"
+        python3 -u /tmp/train_tokenizer_nesy_v21.py "$0" "$@"
     args:
       - --train-corpus
       - inputPath: train_corpus
