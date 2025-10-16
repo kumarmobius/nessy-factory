@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Trainerr
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -193,7 +193,6 @@ implementation:
             print("[DEBUG] model_py_out file (dst):", dst_file)
             
             src_py = _pick_model_py(args.model_py_in)
-# copy into the FILE path we computed earlier
             shutil.copyfile(src_py, dst_file)
 
             # Debug existence before invoking trainer
