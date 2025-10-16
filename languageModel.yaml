@@ -1,0 +1,145 @@
+name: Build LanguageModel
+description: Uses nesy-factory builders to create an untrained model from a tokenizer and layer pattern; saves weights, config, model code, and a schema summary.
+
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: n_layers
+    type: Integer
+    default: "6"
+  - name: layer_pattern
+    type: String
+    default: "S*3,F*1,S*2"
+  - name: model
+    type: String
+    default: "gemma"     # options: "gemma" or "gptneox"
+
+outputs:
+  - name: model_weights
+    type: Model
+  - name: model_config
+    type: Data
+  - name: model_py
+    type: Data
+  - name: schema_json
+    type: Data
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v21
+    command:
+      - bash
+      - -eu
+      - -c
+      - |-
+        set -o pipefail
+
+        cat >/tmp/build_model.py <<'PY'
+        import argparse, json, os, sys
+
+        def main():
+          ap = argparse.ArgumentParser()
+          ap.add_argument("--tokenizer-json", required=True)
+          ap.add_argument("--n-layers", type=int, required=True)
+          ap.add_argument("--layer-pattern", required=True)
+          ap.add_argument("--model", default="gemma", help='gemma or gptneox')
+          ap.add_argument("--model-weights", required=True)
+          ap.add_argument("--model-config", required=True)
+          ap.add_argument("--model-py", required=True)
+          ap.add_argument("--schema-json", required=True)
+          args = ap.parse_args()
+
+          model_lower = str(args.model).strip().lower()
+
+          # Pick the builder
+          builder = None
+          chosen = None
+          import_errors = {}
+
+          if model_lower in ("gemma", "gemma3", "gemma3_builder"):
+            try:
+              from nesy_factory.language_model.gemma import Gemma3Builder
+              builder = Gemma3Builder()
+              chosen = "gemma"
+            except Exception as e:
+              import_errors["gemma"] = repr(e)
+          elif model_lower in ("gptneox", "neo", "neox"):
+            try:
+              from nesy_factory.language_model.gptneox import GPTNeoXBuilder
+              builder = GPTNeoXBuilder()
+              chosen = "gptneox"
+            except Exception as e:
+              import_errors["gptneox"] = repr(e)
+          else:
+            print(f"[FATAL] Unknown model: {args.model}. Use 'gemma' or 'gptneox'.", file=sys.stderr)
+            sys.exit(2)
+
+          if builder is None:
+            print("[FATAL] Could not import the selected builder.", file=sys.stderr)
+            print(json.dumps({"import_errors": import_errors}, indent=2), file=sys.stderr)
+            sys.exit(3)
+
+          # Ensure output directories exist (builders also handle it, but safe here)
+          for p in (args.model_weights, args.model_config, args.model_py, args.schema_json):
+            d = os.path.dirname(p)
+            if d:
+              os.makedirs(d, exist_ok=True)
+
+          # Run the selected builder
+          print(f"[INFO] Using builder: {chosen}")
+          summary = builder.run(
+            tokenizer_json=args.tokenizer_json,
+            n_layers=args.n_layers,
+            layer_pattern=args.layer_pattern,
+            model_weights_out=args.model_weights,
+            model_config_out=args.model_config,
+            model_py_out=args.model_py,
+          )
+
+          print("[INFO] Builder summary:")
+          print(json.dumps(summary, indent=2))
+
+          # Minimal schema summary (inputs + builder summary)
+          schema = {
+            "model": chosen,
+            "inputs": {
+              "tokenizer_json": args.tokenizer_json,
+              "n_layers": args.n_layers,
+              "layer_pattern": args.layer_pattern,
+            },
+            "outputs": {
+              "model_weights": args.model_weights,
+              "model_config": args.model_config,
+              "model_py": args.model_py,
+            },
+            "builder_summary": summary,
+          }
+          with open(args.schema_json, "w", encoding="utf-8") as f:
+            json.dump(schema, f, indent=2)
+
+          print(f"[SUCCESS] Weights: {args.model_weights}")
+          print(f"[SUCCESS] Config : {args.model_config}")
+          print(f"[SUCCESS] Code   : {args.model_py}")
+          print(f"[SUCCESS] Schema : {args.schema_json}")
+
+        if __name__ == "__main__":
+          main()
+        PY
+        python3 -u /tmp/build_model.py "$@"
+    args:
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --n-layers
+      - {inputValue: n_layers}
+      - --layer-pattern
+      - {inputValue: layer_pattern}
+      - --model
+      - {inputValue: model}
+      - --model-weights
+      - {outputPath: model_weights}
+      - --model-config
+      - {outputPath: model_config}
+      - --model-py
+      - {outputPath: model_py}
+      - --schema-json
+      - {outputPath: schema_json}
