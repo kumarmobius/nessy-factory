@@ -1,4 +1,4 @@
-name: LM Trainerr
+name: LM Trainer
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -81,14 +81,13 @@ implementation:
       - |-
         set -o pipefail
 
-        # Show what bash thinks the args are (useful if something upstream strips them)
+        
         echo "[DEBUG] shell received args: $*"
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, shutil, sys
         from pathlib import Path
 
-        # Standard KFP artifact mount points (when using {inputPath: ...})
         DEFAULTS = {
             "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
             "train_corpus":   "/tmp/inputs/train_corpus/data",
@@ -189,9 +188,6 @@ implementation:
             if same:
                 dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
             
-            print("[DEBUG] model_py_in (src):", src)
-            print("[DEBUG] model_py_out file (dst):", dst_file)
-            
             src_py = _pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, dst_file)
 
@@ -234,55 +230,31 @@ implementation:
             )
 
             # Compact schema
+            # Compact schema using epoch/loss list
             try:
                 with open(args.training_report, "r", encoding="utf-8") as f:
-                    rep = json.load(f)
+                    report = json.load(f)
+                    train_curve = report.get("train_curve", [])
+                    val_curve = report.get("val_curve", [])
             except Exception as e:
-                rep = {"error_loading_training_report": repr(e)}
-
-            schema = {
-                "inputs": {
-                    "tokenizer_json": args.tokenizer_json,
-                    "train_corpus": args.train_corpus,
-                    "model_config": args.model_config,
-                    "model_weights": args.model_weights,
-                    "model_py_in": args.model_py_in,
-                },
-                "hyperparams": {
-                    "learning_rate": args.learning_rate,
-                    "min_lr": args.min_lr,
-                    "warmup_steps": args.warmup_steps,
-                    "max_iters": args.max_iters,
-                    "batch_size": args.batch_size,
-                    "block_size": args.block_size,
-                    "grad_accum": args.grad_accum,
-                    "eval_interval": args.eval_interval,
-                    "eval_iters": args.eval_iters,
-                    "weight_decay": args.weight_decay,
-                    "beta2": args.beta2,
-                    "clip_grad_norm": args.clip_grad_norm,
-                    "val_fraction": args.val_fraction,
-                    "num_proc": args.num_proc,
-                },
-                "outputs": {
-                    "best_weights": args.best_weights,
-                    "final_weights": args.final_weights,
-                    "training_report": args.training_report,
-                    "loss_curve_csv": args.loss_curve_csv,
-                    "model_py": args.model_py_out,
-                },
-                "trainer_report": rep,
-            }
+                train_curve, val_curve = [], []
+                print("[WARN] Could not load training_report:", e)
+            
+            schema_list = [
+                {"epoch": int(i), "loss": float(tr), "validation_loss": float(va)}
+                for i, (tr, va) in enumerate(zip(train_curve, val_curve), start=1)
+            ]
+            
             with open(args.schema_output, "w", encoding="utf-8") as f:
-                json.dump(schema, f, indent=2)
+                json.dump(schema_list, f, indent=2)
+            
+            print("[DONE] Training complete — schema_list written.")
 
-            print("[DONE] Training complete.")
 
         if __name__ == "__main__":
             main()
         PY
 
-        # Hand through all KFP-supplied args to the wrapper.
         python3 -u /tmp/train_with_gemmatrainer.py "$@"
       - _
     args:
