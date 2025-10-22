@@ -5,13 +5,13 @@ description: |
 
 inputs:
   - name: tokenizer_json
-    type: String
+    type: Model
     description: Path to tokenizer JSON file
   - name: model_pt
-    type: String
+    type: Model
     description: Path to model PyTorch checkpoint file
   - name: model_config_json
-    type: String
+    type: Data
     description: Path to model config JSON file
   - name: cache_dir
     type: String
@@ -28,7 +28,7 @@ inputs:
 
 outputs:
   - name: converted_model
-    type: String
+    type: Model
     description: Path to converted HuggingFace model
 
 implementation:
