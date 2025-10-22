@@ -36,7 +36,7 @@ implementation:
       - bash
       - -eu
       - -c
-      - |
+      - |-
         set -o pipefail
 
         # --- positional args forwarded from container args ($1..$14) ---
@@ -97,111 +97,111 @@ implementation:
         # Write a robust converter script (pytorch-based) to /tmp/build_hf_neox_folder_dynamic.py
         ###############################################################################
         cat >/tmp/build_hf_neox_folder_dynamic.py <<'PY'
-#!/usr/bin/env python3
-import argparse, os, json, sys, shutil, re
-from collections import OrderedDict
+        #!/usr/bin/env python3
+        import argparse, os, json, sys, shutil, re
+        from collections import OrderedDict
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--src-pt", required=True, help="Path to final .pt checkpoint")
-    ap.add_argument("--tokenizer-json", default=None, help="Optional tokenizer.json")
-    ap.add_argument("--base-cfg-json", default=None, help="Optional gptneox config JSON")
-    ap.add_argument("--out-dir", required=True, help="Output HF model dir")
-    args = ap.parse_args()
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--src-pt", required=True, help="Path to final .pt checkpoint")
+            ap.add_argument("--tokenizer-json", default=None, help="Optional tokenizer.json")
+            ap.add_argument("--base-cfg-json", default=None, help="Optional gptneox config JSON")
+            ap.add_argument("--out-dir", required=True, help="Output HF model dir")
+            args = ap.parse_args()
 
-    SRC_PT = args.src_pt
-    TOKENIZER_JSON = args.tokenizer_json
-    BASE_CFG_JSON = args.base_cfg_json
-    MODEL_DIR = args.out_dir
+            SRC_PT = args.src_pt
+            TOKENIZER_JSON = args.tokenizer_json
+            BASE_CFG_JSON = args.base_cfg_json
+            MODEL_DIR = args.out_dir
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    print("[CONVERTER] SRC_PT:", SRC_PT)
-    try:
-        import torch
-    except Exception as e:
-        print("[CONVERTER][ERROR] missing torch:", e)
-        sys.exit(3)
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            print("[CONVERTER] SRC_PT:", SRC_PT)
+            try:
+                import torch
+            except Exception as e:
+                print("[CONVERTER][ERROR] missing torch:", e)
+                sys.exit(3)
 
-    if not os.path.exists(SRC_PT):
-        print("[CONVERTER][ERROR] checkpoint not found:", SRC_PT)
-        sys.exit(2)
+            if not os.path.exists(SRC_PT):
+                print("[CONVERTER][ERROR] checkpoint not found:", SRC_PT)
+                sys.exit(2)
 
-    sd = torch.load(SRC_PT, map_location="cpu")
-    if isinstance(sd, dict) and "state_dict" in sd:
-        sd = sd["state_dict"]
-    out = OrderedDict(sd)
+            sd = torch.load(SRC_PT, map_location="cpu")
+            if isinstance(sd, dict) and "state_dict" in sd:
+                sd = sd["state_dict"]
+            out = OrderedDict(sd)
 
-    # compatibility fixes (rename layernorm, mirror embeddings, add missing biases)
-    if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
-        out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
-        if "gpt_neox.final_layernorm.bias" in out:
-            out["gpt_neox.final_layer_norm.bias"] = out.pop("gpt_neox.final_layernorm.bias")
+            # compatibility fixes (rename layernorm, mirror embeddings, add missing biases)
+            if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
+                out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
+                if "gpt_neox.final_layernorm.bias" in out:
+                    out["gpt_neox.final_layer_norm.bias"] = out.pop("gpt_neox.final_layernorm.bias")
 
-    if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
-        out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
+            if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
+                out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-    # best-effort add missing biases
-    layer_ids = sorted({int(m.group(1)) for k in out.keys()
-                        for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
-    try:
-        import torch as _torch
-        for i in layer_ids:
-            wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
-            wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
-            if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
-                out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = _torch.zeros(wq.size(0), dtype=wq.dtype)
-            if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
-                out[f"gpt_neox.layers.{i}.attention.dense.bias"] = _torch.zeros(wo.size(0), dtype=wo.dtype)
-    except Exception:
-        pass
+            # best-effort add missing biases
+            layer_ids = sorted({int(m.group(1)) for k in out.keys()
+                                for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
+            try:
+                import torch as _torch
+                for i in layer_ids:
+                    wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
+                    wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
+                    if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
+                        out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = _torch.zeros(wq.size(0), dtype=wq.dtype)
+                    if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
+                        out[f"gpt_neox.layers.{i}.attention.dense.bias"] = _torch.zeros(wo.size(0), dtype=wo.dtype)
+            except Exception:
+                pass
 
-    # save pytorch_model.bin
-    torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-    print("[CONVERTER] Wrote pytorch_model.bin to", MODEL_DIR)
+            # save pytorch_model.bin
+            torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+            print("[CONVERTER] Wrote pytorch_model.bin to", MODEL_DIR)
 
-    # infer some basic config values
-    vocab_size = None
-    hidden_size = None
-    for k in out.keys():
-        if k.endswith("embed_in.weight"):
-            vocab_size, hidden_size = out[k].shape
-            break
+            # infer some basic config values
+            vocab_size = None
+            hidden_size = None
+            for k in out.keys():
+                if k.endswith("embed_in.weight"):
+                    vocab_size, hidden_size = out[k].shape
+                    break
 
-    # guessed defaults
-    hf_cfg = {
-        "architectures": ["GPTNeoXForCausalLM"],
-        "model_type": "gpt_neox",
-        "vocab_size": int(vocab_size) if vocab_size else 50257,
-        "hidden_size": int(hidden_size) if hidden_size else 2048,
-        "num_attention_heads": int(os.environ.get("NUM_HEADS", 16)),
-        "num_hidden_layers": int(os.environ.get("NUM_LAYERS", 1)),
-        "max_position_embeddings": int(os.environ.get("MAX_POS", 512)),
-        "rotary_pct": float(os.environ.get("ROTARY_PCT", 0.25)),
-    }
-    with open(os.path.join(MODEL_DIR, "config.json"), "w") as f:
-        json.dump(hf_cfg, f, indent=2)
-    print("[CONVERTER] Wrote config.json")
+            # guessed defaults
+            hf_cfg = {
+                "architectures": ["GPTNeoXForCausalLM"],
+                "model_type": "gpt_neox",
+                "vocab_size": int(vocab_size) if vocab_size else 50257,
+                "hidden_size": int(hidden_size) if hidden_size else 2048,
+                "num_attention_heads": int(os.environ.get("NUM_HEADS", 16)),
+                "num_hidden_layers": int(os.environ.get("NUM_LAYERS", 1)),
+                "max_position_embeddings": int(os.environ.get("MAX_POS", 512)),
+                "rotary_pct": float(os.environ.get("ROTARY_PCT", 0.25)),
+            }
+            with open(os.path.join(MODEL_DIR, "config.json"), "w") as f:
+                json.dump(hf_cfg, f, indent=2)
+            print("[CONVERTER] Wrote config.json")
 
-    # minimal tokenizer_config/special tokens/generation_config
-    tok_cfg = {"model_max_length": hf_cfg["max_position_embeddings"], "pad_token_id":0, "unk_token_id":1, "bos_token_id":2, "eos_token_id":3}
-    with open(os.path.join(MODEL_DIR, "tokenizer_config.json"), "w") as f:
-        json.dump(tok_cfg, f, indent=2)
-    spec_map = {"pad_token": "[PAD]", "unk_token": "[UNK]", "bos_token": "[BOS]", "eos_token": "[EOS]"}
-    with open(os.path.join(MODEL_DIR, "special_tokens_map.json"), "w") as f:
-        json.dump(spec_map, f, indent=2)
-    gen_cfg = {"max_length": hf_cfg["max_position_embeddings"], "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
-    with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
-        json.dump(gen_cfg, f, indent=2)
+            # minimal tokenizer_config/special tokens/generation_config
+            tok_cfg = {"model_max_length": hf_cfg["max_position_embeddings"], "pad_token_id":0, "unk_token_id":1, "bos_token_id":2, "eos_token_id":3}
+            with open(os.path.join(MODEL_DIR, "tokenizer_config.json"), "w") as f:
+                json.dump(tok_cfg, f, indent=2)
+            spec_map = {"pad_token": "[PAD]", "unk_token": "[UNK]", "bos_token": "[BOS]", "eos_token": "[EOS]"}
+            with open(os.path.join(MODEL_DIR, "special_tokens_map.json"), "w") as f:
+                json.dump(spec_map, f, indent=2)
+            gen_cfg = {"max_length": hf_cfg["max_position_embeddings"], "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
+            with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
+                json.dump(gen_cfg, f, indent=2)
 
-    # copy tokenizer.json if provided
-    if TOKENIZER_JSON and os.path.exists(TOKENIZER_JSON):
-        shutil.copy2(TOKENIZER_JSON, os.path.join(MODEL_DIR, "tokenizer.json"))
+            # copy tokenizer.json if provided
+            if TOKENIZER_JSON and os.path.exists(TOKENIZER_JSON):
+                shutil.copy2(TOKENIZER_JSON, os.path.join(MODEL_DIR, "tokenizer.json"))
 
-    print("[CONVERTER] Conversion complete. Model folder:", MODEL_DIR)
+            print("[CONVERTER] Conversion complete. Model folder:", MODEL_DIR)
 
-if __name__ == "__main__":
-    main()
-PY
+        if __name__ == "__main__":
+            main()
+        PY
 
         echo "[CONVERT] Running converter script..."
         # run converter; fail gracefully but capture logs
