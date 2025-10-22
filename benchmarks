@@ -1,7 +1,7 @@
-name: hf_convertor
+name: HFConvertor
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
-  This component ONLY performs conversion and returns the HF folder as the single artifact.
+  This component performs conversion and returns the HF folder as the single artifact.
 
 inputs:
   - name: tokenizer_json
@@ -34,7 +34,7 @@ implementation:
       - |
         set -o pipefail
 
-        # Pass arguments directly to the Python script
+        # Map inputs -> env vars used by the embedded Python
         TOKENIZER_PATH="${TOKENIZER_JSON}"
         PT_PATH="${MODEL_PT}"
         CFG_JSON_PATH="${MODEL_CONFIG_JSON}"
@@ -43,79 +43,177 @@ implementation:
         MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-80}"
         OUT_CONVERTED="${CONVERTED_MODEL:-/tmp/outputs/converted_model/data}"
 
-        # Create the output directory if it doesn't exist
+        mkdir -p "$OUT_MODEL_DIR"
+        mkdir -p "$(dirname "$OUT_CONVERTED")"
         mkdir -p "$OUT_CONVERTED"
 
-        # Running the Python conversion script directly
-        python3 - <<'PYTHON_SCRIPT'
-        import os, json, torch
-        from collections import OrderedDict
+        python3 - <<'PY'
+import os, re, json, shutil, torch
+from collections import OrderedDict
 
-        # --- File paths ---
-        SRC_PT = os.path.join(os.getcwd(), os.getenv("PT_PATH"))  # Get the path directly from the environment variable
-        TOKENIZER_JSON = os.path.join(os.getcwd(), os.getenv("TOKENIZER_PATH"))  # Get the path directly from the environment variable
-        BASE_CFG_JSON = os.path.join(os.getcwd(), os.getenv("CFG_JSON_PATH"))  # Get the path directly from the environment variable
-        MODEL_DIR = "/tmp/hf_model"
+SRC_PT = os.getenv("PT_PATH")
+TOKENIZER_JSON = os.getenv("TOKENIZER_PATH")
+BASE_CFG_JSON = os.getenv("CFG_JSON_PATH")
+MODEL_DIR = os.getenv("OUT_MODEL_DIR", "/tmp/hf_model")
+OUT_CONVERTED = os.getenv("OUT_CONVERTED", "/tmp/outputs/converted_model/data")
 
-        os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
-        # Load the provided configuration from the model_config_json
-        if os.path.exists(BASE_CFG_JSON):
-            with open(BASE_CFG_JSON, "r") as f:
-                hf_cfg = json.load(f)
-        else:
-            raise ValueError(f"Configuration file {BASE_CFG_JSON} not found!")
+# --- Load state dict ---
+if not SRC_PT or not os.path.exists(SRC_PT):
+    raise FileNotFoundError(f"Checkpoint not found at {SRC_PT}")
+sd = torch.load(SRC_PT, map_location="cpu")
+if isinstance(sd, dict) and "state_dict" in sd:
+    sd = sd["state_dict"]
+out = OrderedDict(sd)
 
-        print("[CONVERTER] Loaded model configuration from", BASE_CFG_JSON)
+# --- Compatibility fixes ---
+if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
+    out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
+    out["gpt_neox.final_layer_norm.bias"] = out.pop("gpt_neox.final_layernorm.bias")
 
-        # Load state dict
-        sd = torch.load(SRC_PT, map_location="cpu")
-        if isinstance(sd, dict) and "state_dict" in sd:
-            sd = sd["state_dict"]
-        out = OrderedDict(sd)
+if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
+    out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-        # Ensure compatibility (renaming layernorm, handling embeddings)
-        if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
-            out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
-            out["gpt_neox.final_layer_norm.bias"] = out.pop("gpt_neox.final_layernorm.bias")
+# Ensure bias tensors exist for QKV and WO if missing (keeps model shape consistent)
+layer_ids = sorted({int(m.group(1)) for k in out.keys()
+                    for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
+for i in layer_ids:
+    wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
+    wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
+    if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
+        out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
+    if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
+        out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
 
-        if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
-            out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
+# Save an initial pytorch_model.bin (will be overwritten later if embeddings tied)
+torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
 
-        # Save pytorch model
-        torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
-        print("[CONVERTER] Wrote pytorch_model.bin")
+# --- Infer model geometry ---
+try:
+    vocab_size, hidden_size = out["gpt_neox.embed_in.weight"].shape
+except Exception as e:
+    raise RuntimeError("Could not read embed_in.weight shape from checkpoint") from e
 
-        # Tokenizer configuration (if available)
-        if os.path.exists(TOKENIZER_JSON):
-            shutil.copy2(TOKENIZER_JSON, os.path.join(MODEL_DIR, "tokenizer.json"))
-            print("[CONVERTER] Copied tokenizer.json to model directory.")
+num_layers = 1 + max(int(re.search(r"gpt_neox\.layers\.(\d+)\.", k).group(1))
+                     for k in out if k.startswith("gpt_neox.layers."))
+intermediate_size = out["gpt_neox.layers.0.mlp.dense_h_to_4h.weight"].shape[0]
 
-        # Special tokens map
-        spec_map = {
-            "pad_token": "[PAD]", "unk_token": "[UNK]", "bos_token": "[BOS]", "eos_token": "[EOS]"
-        }
-        with open(os.path.join(MODEL_DIR, "special_tokens_map.json"), "w") as f:
-            json.dump(spec_map, f, indent=2)
+def infer_heads(hid):
+    for h in [32, 16, 8, 24, 12, 4, 2]:
+        if hid % h == 0:
+            return h
+    return max(1, hid // 64) or 8
 
-        # Generation config
-        gen_cfg = {"max_length": hf_cfg.get("max_position_embeddings", 512), "do_sample": False, "eos_token_id": hf_cfg.get("eos_token_id", 3)}
-        with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
-            json.dump(gen_cfg, f, indent=2)
+def detect_tie(sd_map):
+    try:
+        return sd_map["gpt_neox.embed_out.weight"].data_ptr() == sd_map["gpt_neox.embed_in.weight"].data_ptr()
+    except Exception:
+        return False
 
-        print("[CONVERTER] Conversion completed.")
-        PYTHON_SCRIPT
+# --- Load base config (optional) ---
+cfg = {}
+if BASE_CFG_JSON and os.path.exists(BASE_CFG_JSON):
+    try:
+        with open(BASE_CFG_JSON, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
 
-        # Ensure converted artifact path exists and copy HF folder into it
-        mkdir -p "$(dirname "$OUT_CONVERTED")" "$OUT_CONVERTED"
-        if [ -d "$OUT_MODEL_DIR" ]; then
-          cp -r "$OUT_MODEL_DIR"/. "$OUT_CONVERTED"/
-          echo "[CONVERT] Copied HF folder into artifact path: $OUT_CONVERTED"
-        else
-          echo "[CONVERT][ERROR] Expected HF model dir not found at $OUT_MODEL_DIR."
-        fi
+num_heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or infer_heads(hidden_size))
+max_pos = int(cfg.get("max_position_embeddings") or cfg.get("max_seq_len") or 512)
+rotary_pct = float(cfg.get("rotary_pct", 0.25))
+rotary_base = float(cfg.get("rotary_emb_base", 10000.0))
+use_parallel_residual = bool(cfg.get("use_parallel_residual", False))
+layer_norm_eps = float(cfg.get("layer_norm_eps", 1e-5))
+hidden_act = str(cfg.get("hidden_act", "gelu"))
+tie_word_embeddings = bool(cfg.get("tie_word_embeddings", detect_tie(out)))
+
+hf_cfg = {
+    "architectures": ["GPTNeoXForCausalLM"],
+    "model_type": "gpt_neox",
+    "vocab_size": int(vocab_size),
+    "hidden_size": int(hidden_size),
+    "intermediate_size": int(intermediate_size),
+    "num_attention_heads": int(num_heads),
+    "num_hidden_layers": int(num_layers),
+    "max_position_embeddings": int(max_pos),
+    "rotary_pct": rotary_pct,
+    "rotary_emb_base": rotary_base,
+    "use_parallel_residual": use_parallel_residual,
+    "layer_norm_eps": layer_norm_eps,
+    "hidden_act": hidden_act,
+    "tie_word_embeddings": tie_word_embeddings,
+}
+
+with open(os.path.join(MODEL_DIR, "config.json"), "w") as f:
+    json.dump(hf_cfg, f, indent=2)
+
+# If embeddings are tied, drop embed_out weight to save space (HF expects only embed_in)
+if tie_word_embeddings and "gpt_neox.embed_out.weight" in out:
+    out.pop("gpt_neox.embed_out.weight")
+    torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+
+# --- Tokenizer handling ---
+ids = {"pad_token_id": None, "unk_token_id": None, "bos_token_id": None, "eos_token_id": None}
+if TOKENIZER_JSON and os.path.exists(TOKENIZER_JSON):
+    try:
+        shutil.copy2(TOKENIZER_JSON, os.path.join(MODEL_DIR, "tokenizer.json"))
+    except Exception:
+        pass
+    try:
+        t = json.load(open(TOKENIZER_JSON))
+        name_map = {"[PAD]":"pad_token_id","[UNK]":"unk_token_id","[BOS]":"bos_token_id","[EOS]":"eos_token_id"}
+        for a in t.get("added_tokens", []):
+            if a.get("special") and "id" in a and a.get("content") in name_map:
+                ids[name_map[a["content"]]] = a["id"]
+    except Exception:
+        ids = {}
+
+tok_cfg = {
+    "model_max_length": max_pos,
+    "pad_token_id": ids.get("pad_token_id", 0),
+    "unk_token_id": ids.get("unk_token_id", 1),
+    "bos_token_id": ids.get("bos_token_id", 2),
+    "eos_token_id": ids.get("eos_token_id", 3),
+}
+with open(os.path.join(MODEL_DIR, "tokenizer_config.json"), "w") as f:
+    json.dump(tok_cfg, f, indent=2)
+
+spec_map = {
+    "pad_token": "[PAD]", "unk_token": "[UNK]", "bos_token": "[BOS]", "eos_token": "[EOS]"
+}
+with open(os.path.join(MODEL_DIR, "special_tokens_map.json"), "w") as f:
+    json.dump(spec_map, f, indent=2)
+
+gen_cfg = {"max_length": max_pos, "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
+with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
+    json.dump(gen_cfg, f, indent=2)
+
+# Final sanity prints
+print("Wrote HF model folder at:", MODEL_DIR)
+print("Summary:", {
+    "vocab_size": int(vocab_size), "hidden_size": int(hidden_size),
+    "layers": int(num_layers), "heads": int(num_heads),
+    "intermediate_size": int(intermediate_size),
+    "max_pos": int(max_pos), "tied": tie_word_embeddings
+})
+
+# Copy entire HF folder into the expected converted artifact output
+os.makedirs(OUT_CONVERTED, exist_ok=True)
+# Use copytree style to make contents available in artifact directory
+for root, dirs, files in os.walk(MODEL_DIR):
+    rel = os.path.relpath(root, MODEL_DIR)
+    target_dir = os.path.join(OUT_CONVERTED, rel) if rel != "." else OUT_CONVERTED
+    os.makedirs(target_dir, exist_ok=True)
+    for f in files:
+        shutil.copy2(os.path.join(root, f), os.path.join(target_dir, f))
+
+print(f"Copied HF folder contents to {OUT_CONVERTED}")
+PY
 
         echo "[CONVERT] Done."
+
     args:
       - inputPath: tokenizer_json
       - inputPath: model_pt
