@@ -1,4 +1,4 @@
-name: hf_convert
+name: HFConvertor
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   This component performs conversion and returns the HF folder as the single artifact.
@@ -27,21 +27,11 @@ outputs:
 implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
-    # Optional resources — uncomment / adjust in your environment if needed.
-    # resources:
-    #   requests:
-    #     cpu: "2"
-    #     memory: "8Gi"
-    #   limits:
-    #     cpu: "4"
-    #     memory: "16Gi"
-    #     # To request a GPU in Kubernetes, uncomment the following (cluster must have NVIDIA device plugin)
-    #     # nvidia.com/gpu: "1"
     command:
       - bash
       - -eu
       - -c
-      - |-
+      - |
         set -o pipefail
 
         # Positional args from Kubeflow/Argo (keeps compatibility if platform uses $1,$2,$3)
@@ -94,7 +84,7 @@ implementation:
         export RAW_TOKENIZER RAW_MODEL_PT RAW_MODEL_CFG CACHE_DIR OUT_MODEL_DIR OUT_CONVERTED MAX_NEW_TOKENS
 
         # Run the robust python converter that auto-detects which file is the checkpoint.
-        python3 - <<'PY'
+        python3 - <<'PYTHON_CONVERTER'
 import os, sys, json, shutil, torch, re
 from collections import OrderedDict
 
@@ -371,15 +361,14 @@ for root, dirs, files in os.walk(OUT_MODEL_DIR):
 
 print(f"[CONVERTER] Copied HF folder contents to: {OUT_CONVERTED}", file=sys.stderr)
 print("[CONVERTER] Conversion complete!", file=sys.stderr)
-PY
+PYTHON_CONVERTER
 
         echo "[CONVERT] Done."
-
     args:
-      - {inputPath: tokenizer_json}
-      - {inputPath: model_pt}
-      - {inputPath: model_config_json}
-      - {inputValue: cache_dir}
-      - {inputValue: output_model_dir}
-      - {inputValue: max_new_tokens}
-      - {outputPath: converted_model}
+      - inputPath: tokenizer_json
+      - inputPath: model_pt
+      - inputPath: model_config_json
+      - inputValue: cache_dir
+      - inputValue: output_model_dir
+      - inputValue: max_new_tokens
+      - outputPath: converted_model
