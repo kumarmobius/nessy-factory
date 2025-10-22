@@ -207,7 +207,7 @@ implementation:
 
         # Run tasks one-by-one; continue on failure
         for task in TASKS:
-            print("\n[EVAL] --- Running task: {}".format(task))
+            print("\nRunning task: {}".format(task))
             _preload_for_task(task)
 
             start_t = time.time()
