@@ -1,4 +1,4 @@
-name: Benchmarks
+name: benchmark
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into Hugging Face model folder,
   then run per-task benchmarks (mmlu_pro, bbh, math, ifeval, gpqa) and return compact metrics + CO2.
@@ -47,14 +47,26 @@ implementation:
       - bash
       - -eu
       - -c
-      - python3
-      -  (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location
-      'codecarbon' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet
-      --no-warn-script-location 'lm_eval' --user) && "$0" "$@
       - |-
         set -o pipefail
         echo "[PIPELINE] Starting convert + benchmark pipeline"
         echo "[PIPELINE] args: $*"
+
+        # Expected call order when pipeline executes this container:
+        # 1: hf_token (can be empty)
+        # 2: tokenizer_json inputPath
+        # 3: model_pt inputPath
+        # 4: model_config_json inputPath
+        # 5: model_py_in inputPath
+        # 6: tasks (string)
+        # 7: cache_dir
+        # 8: output_model_dir
+        # 9: max_new_tokens
+        # 10: out_compact path
+        # 11: out_full path
+        # 12: out_emissions path
+        # 13: log path
+
         HF_TOKEN_ARG="${1:-}"
         TOKENIZER_PATH="${2:-}"
         PT_PATH="${3:-}"
@@ -69,7 +81,7 @@ implementation:
         OUT_EMISSIONS="${12:-/tmp/emissions.csv}"
         LOGFILE="${13:-/tmp/convert_and_eval.log}"
 
-        mkdir -p "$CACHE_DIR" "$OUT_MODEL_DIR" "$(dirname "$OUT_COMPACT")" "$(dirname "$OUT_FULL")" "$(dirname "$OUT_EMISSIONS")" "$(dirname "$LOGFILE")"
+        mkdir -p "$CACHE_DIR" "$OUT_MODEL_DIR" "$(dirname "$OUT_COMPACT")" "$(dirname "$OUT_FULL")" "$(dirname "$OUT_EMISSIONS")"
         echo "[PIPELINE] CACHE_DIR=$CACHE_DIR OUT_MODEL_DIR=$OUT_MODEL_DIR" | tee -a "$LOGFILE"
 
         # Save token to env if provided (used by datasets/hf hub)
