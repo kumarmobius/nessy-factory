@@ -1,28 +1,35 @@
-name: hf_convert
+name: HFConvert
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   This component performs conversion and returns the HF folder as the single artifact.
 
 inputs:
   - name: tokenizer_json
-    type: Model
+    type: String
+    description: Path to tokenizer JSON file
   - name: model_pt
-    type: Model
+    type: String
+    description: Path to model PyTorch checkpoint file
   - name: model_config_json
-    type: Data
+    type: String
+    description: Path to model config JSON file
   - name: cache_dir
     type: String
-    default: "/tmp/hf_cache"
+    default: /tmp/hf_cache
+    description: Cache directory for conversion
   - name: output_model_dir
     type: String
-    default: "/tmp/hf_model"
+    default: /tmp/hf_model
+    description: Output model directory
   - name: max_new_tokens
     type: Integer
     default: "80"
+    description: Maximum new tokens
 
 outputs:
   - name: converted_model
-    type: Model
+    type: String
+    description: Path to converted HuggingFace model
 
 implementation:
   container:
@@ -31,7 +38,7 @@ implementation:
       - bash
       - -eu
       - -c
-      - |-
+      - |
         set -o pipefail
 
         # Positional args from Kubeflow/Argo (keeps compatibility if platform uses $1,$2,$3)
