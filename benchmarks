@@ -1,4 +1,4 @@
-name: benchmark
+name: Benchmark
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into Hugging Face model folder,
   then run per-task benchmarks (mmlu_pro, bbh, math, ifeval, gpqa) and return compact metrics + CO2.
@@ -44,29 +44,15 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
-      - bash
-      - -eu
+      - sh
       - -c
-      - |-
+      - |
+        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'lm_eval' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'codecarbon' --user) && bash -eu -s <<'PY'
         set -o pipefail
         echo "[PIPELINE] Starting convert + benchmark pipeline"
         echo "[PIPELINE] args: $*"
 
-        # Expected call order when pipeline executes this container:
-        # 1: hf_token (can be empty)
-        # 2: tokenizer_json inputPath
-        # 3: model_pt inputPath
-        # 4: model_config_json inputPath
-        # 5: model_py_in inputPath
-        # 6: tasks (string)
-        # 7: cache_dir
-        # 8: output_model_dir
-        # 9: max_new_tokens
-        # 10: out_compact path
-        # 11: out_full path
-        # 12: out_emissions path
-        # 13: log path
-
+        # positional args (expected)
         HF_TOKEN_ARG="${1:-}"
         TOKENIZER_PATH="${2:-}"
         PT_PATH="${3:-}"
@@ -80,8 +66,11 @@ implementation:
         OUT_FULL="${11:-/tmp/metrics_full.json}"
         OUT_EMISSIONS="${12:-/tmp/emissions.csv}"
         LOGFILE="${13:-/tmp/convert_and_eval.log}"
+        # NEW: converted-model artifact path (positional $14)
+        OUT_CONVERTED="${14:-/tmp/outputs/converted_model/data}"
 
-        mkdir -p "$CACHE_DIR" "$OUT_MODEL_DIR" "$(dirname "$OUT_COMPACT")" "$(dirname "$OUT_FULL")" "$(dirname "$OUT_EMISSIONS")"
+        # ensure parent dirs exist (now includes converted-model)
+        mkdir -p "$CACHE_DIR" "$OUT_MODEL_DIR" "$(dirname "$OUT_COMPACT")" "$(dirname "$OUT_FULL")" "$(dirname "$OUT_EMISSIONS")" "$(dirname "$OUT_CONVERTED")"
         echo "[PIPELINE] CACHE_DIR=$CACHE_DIR OUT_MODEL_DIR=$OUT_MODEL_DIR" | tee -a "$LOGFILE"
 
         # Save token to env if provided (used by datasets/hf hub)
@@ -443,10 +432,23 @@ implementation:
 
         # Copy outputs to pipeline mount points (expected by pipeline system)
         cp -r "$OUT_MODEL_DIR" /tmp/hf_model_output 2>/dev/null || true
+
+        # Ensure converted artifact directory exists and copy converted model into it
+        mkdir -p "$(dirname "$OUT_CONVERTED")"
+        # If the artifact path is meant to be a directory, copy model content into it:
+        if [ -d "$OUT_MODEL_DIR" ]; then
+          mkdir -p "$OUT_CONVERTED"
+          cp -r "$OUT_MODEL_DIR"/. "$OUT_CONVERTED"/ || true
+        else
+          # Otherwise, attempt to tar the model dir into the artifact file (fallback)
+          tar -czf "$OUT_CONVERTED" -C "$(dirname "$OUT_MODEL_DIR")" "$(basename "$OUT_MODEL_DIR")" 2>/dev/null || true
+        fi
+
         cp "$OUT_COMPACT" /tmp/out_compact.json || true
         cp "$OUT_FULL" /tmp/out_full.json || true
         cp "$OUT_EMISSIONS" /tmp/out_emissions.csv || true
         echo "[PIPELINE] Done. Logs at $LOGFILE" | tee -a "$LOGFILE"
+        PY
     args:
       - {inputValue: hf_token}
       - {inputPath: tokenizer_json}
