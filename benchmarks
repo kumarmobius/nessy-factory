@@ -1,4 +1,4 @@
-name: HFConvert
+name: HFConvertor
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   This component performs conversion and returns the HF folder as the single artifact.
@@ -115,7 +115,6 @@ implementation:
                 return False
 
         def guess_paths(cands):
-            """Return tuple (pt_path, tokenizer_path, config_path) guessed from content."""
             pt = None; tok = None; cfg = None
             # First pass: detect JSON vs non-JSON
             for p in cands:
