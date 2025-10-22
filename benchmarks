@@ -1,4 +1,4 @@
-name: hf_convertor
+name: HFConvertor
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   This component ONLY performs conversion and returns the HF folder as the single artifact.
@@ -18,7 +18,7 @@ inputs:
     default: "/tmp/hf_model"
   - name: max_new_tokens
     type: Integer
-    default: "64"
+    default: "80"
 
 outputs:
   - name: converted_model
@@ -34,28 +34,24 @@ implementation:
       - |
         set -o pipefail
 
-        # --- positional args forwarded from container args ---
-        TOKENIZER_PATH="${1:-}"
-        PT_PATH="${2:-}"
-        CFG_JSON_PATH="${3:-}"
-        CACHE_DIR="${4:-/tmp/hf_cache}"
-        OUT_MODEL_DIR="${5:-/tmp/hf_model}"
-        MAX_NEW_TOKENS="${6:-80}"
-        OUT_CONVERTED="${7:-/tmp/outputs/converted_model/data}"
+        # Directly access the input arguments for the Python script
+        TOKENIZER_PATH="${TOKENIZER_JSON}"
+        PT_PATH="${MODEL_PT}"
+        CFG_JSON_PATH="${MODEL_CONFIG_JSON}"
+        CACHE_DIR="${CACHE_DIR:-/tmp/hf_cache}"
+        OUT_MODEL_DIR="${OUTPUT_MODEL_DIR:-/tmp/hf_model}"
+        MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-80}"
+        OUT_CONVERTED="${CONVERTED_MODEL:-/tmp/outputs/converted_model/data}"
 
-        echo "[CONVERT] args: TOKENIZER='${TOKENIZER_PATH}' PT='${PT_PATH}' CFG='${CFG_JSON_PATH}' CACHE_DIR='${CACHE_DIR}' OUT_MODEL_DIR='${OUT_MODEL_DIR}' OUT_CONVERTED='${OUT_CONVERTED}'"
-
-        # Running the Python conversion script directly from arguments
-        echo "[CONVERT] Running converter script..."
-
+        # Running the Python conversion script directly
         python3 - <<'PYTHON_SCRIPT'
         import os, json, torch
         from collections import OrderedDict
 
         # --- File paths ---
-        SRC_PT = "${PT_PATH}"  # directly using the argument
-        TOKENIZER_JSON = "${TOKENIZER_PATH}"  # directly using the argument
-        BASE_CFG_JSON = "${CFG_JSON_PATH}"  # directly using the argument
+        SRC_PT = os.getenv("PT_PATH")  # Get the path directly from the environment variable
+        TOKENIZER_JSON = os.getenv("TOKENIZER_PATH")  # Get the path directly from the environment variable
+        BASE_CFG_JSON = os.getenv("CFG_JSON_PATH")  # Get the path directly from the environment variable
         MODEL_DIR = "/tmp/hf_model"
 
         os.makedirs(MODEL_DIR, exist_ok=True)
