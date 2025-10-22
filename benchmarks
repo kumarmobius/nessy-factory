@@ -1,4 +1,4 @@
-name: convert_to_hf
+name: hf_convertor
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   This component ONLY performs conversion and returns the HF folder as the single artifact.
@@ -23,7 +23,7 @@ inputs:
     default: "/tmp/hf_model"
   - name: max_new_tokens
     type: Integer
-    default: "64"
+    default: 64
 
 outputs:
   - name: converted_model
@@ -36,7 +36,7 @@ implementation:
       - bash
       - -eu
       - -c
-      - |-
+      - |
         set -o pipefail
 
         # --- positional args forwarded from container args ($1..$14) ---
@@ -96,7 +96,7 @@ implementation:
         ###############################################################################
         # Write a robust converter script (pytorch-based) to /tmp/build_hf_neox_folder_dynamic.py
         ###############################################################################
-        cat >/tmp/build_hf_neox_folder_dynamic.py <<'PY'
+        cat >/tmp/build_hf_neox_folder_dynamic.py <<'PYTHON_SCRIPT'
         #!/usr/bin/env python3
         import argparse, os, json, sys, shutil, re
         from collections import OrderedDict
@@ -201,7 +201,7 @@ implementation:
 
         if __name__ == "__main__":
             main()
-        PY
+        PYTHON_SCRIPT
 
         echo "[CONVERT] Running converter script..."
         # run converter; fail gracefully but capture logs
@@ -223,12 +223,12 @@ implementation:
 
         echo "[CONVERT] Done."
     args:
-      - {inputValue: hf_token}
-      - {inputPath: tokenizer_json}
-      - {inputPath: model_pt}
-      - {inputPath: model_config_json}
-      - {inputPath: model_py_in}
-      - {inputValue: cache_dir}
-      - {inputValue: output_model_dir}
-      - {inputValue: max_new_tokens}
-      - {outputPath: converted_model}
+      - inputValue: hf_token
+      - inputPath: tokenizer_json
+      - inputPath: model_pt
+      - inputPath: model_config_json
+      - inputPath: model_py_in
+      - inputValue: cache_dir
+      - inputValue: output_model_dir
+      - inputValue: max_new_tokens
+      - outputPath: converted_model
