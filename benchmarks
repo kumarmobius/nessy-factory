@@ -1,4 +1,4 @@
-name: EvalBenchmarksNoMuSR
+name: EvalBenchmarks
 description: |
   Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
   Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
@@ -62,7 +62,6 @@ implementation:
         export PATH="$HOME/.local/bin:$PATH"
         echo "[BOOT] Python deps installed. Running evaluator..."
         python3 -u - <<'PY'
-
 
         import argparse
         import os
@@ -208,7 +207,7 @@ implementation:
 
         # Run tasks one-by-one; continue on failure
         for task in TASKS:
-            print(f"\n[EVAL] --- Running task: {task} ---")
+            print("\n[EVAL] --- Running task: {}".format(task))
             _preload_for_task(task)
 
             start_t = time.time()
