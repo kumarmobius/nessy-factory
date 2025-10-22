@@ -1,0 +1,449 @@
+name: hf-convert-and-benchmark
+description: |
+  Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into Hugging Face model folder,
+  then run per-task benchmarks (mmlu_pro, bbh, math, ifeval, gpqa) and return compact metrics + CO2.
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: model_pt
+    type: Model
+  - name: model_config_json
+    type: Data
+  - name: model_py_in
+    type: Data
+  - name: hf_token
+    type: String
+    default: ""
+  - name: tasks
+    type: String
+    default: "mmlu_pro,bbh,math,ifeval,gpqa"   # comma-separated list
+  - name: cache_dir
+    type: String
+    default: "/tmp/hf_cache"
+  - name: output_model_dir
+    type: String
+    default: "/tmp/hf_model"
+  - name: max_new_tokens
+    type: Integer
+    default: 64
+
+outputs:
+  - name: converted_model
+    type: Model
+  - name: compact_metrics_json
+    type: Data
+  - name: full_results_json
+    type: Data
+  - name: emissions_csv
+    type: Data
+  - name: logs
+    type: Data
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v21
+    command:
+      - bash
+      - -eu
+      - -c
+      - |-
+        set -o pipefail
+        echo "[PIPELINE] Starting convert + benchmark pipeline"
+        echo "[PIPELINE] args: $*"
+
+        # resolve inputs (KFP-style mounts or provided paths)
+        TOKEN="${1:-""}"
+        TOKEN_PATH="${2:-}"
+        PT_PATH="${3:-}"
+        CFG_JSON_PATH="${4:-}"
+        MODEL_PY_IN="${5:-}"
+        TASKS_CSV="${6:-mmlu_pro,bbh,math,ifeval,gpqa}"
+        CACHE_DIR="${7:-/tmp/hf_cache}"
+        OUT_MODEL_DIR="${8:-/tmp/hf_model}"
+        MAX_NEW_TOKENS="${9:-64}"
+        LOGFILE="/tmp/convert_and_eval.log"
+
+        mkdir -p "$CACHE_DIR" "$OUT_MODEL_DIR"
+        echo "[PIPELINE] CACHE_DIR=$CACHE_DIR OUT_MODEL_DIR=$OUT_MODEL_DIR" | tee -a "$LOGFILE"
+
+        # Map KFP mounted input placeholders if used (helpers)
+        # If pipeline system maps inputs differently, adapt these.
+        # Expected call order when pipeline executes this container:
+        # 1: hf_token (can be empty)
+        # 2: tokenizer_json inputPath
+        # 3: model_pt inputPath
+        # 4: model_config_json inputPath
+        # 5: model_py_in inputPath
+        # 6: tasks (string)
+        # 7: cache_dir
+        # 8: output_model_dir
+        # 9: max_new_tokens
+
+        # Save token to env if provided
+        if [ -n "$TOKEN" ]; then
+          export HUGGINGFACE_HUB_TOKEN="$TOKEN"
+          echo "[PIPELINE] Saved HF token"
+        fi
+
+        # Copy inputs to known locations (if pipeline used inputPath placeholders, they are already paths)
+        # Tokenizer JSON
+        if [ -n "$TOKEN_PATH" ] && [ -f "$TOKEN_PATH" ]; then
+          cp "$TOKEN_PATH" "$OUT_MODEL_DIR/tokenizer.json"
+          echo "[PIPELINE] Copied tokenizer.json -> $OUT_MODEL_DIR/tokenizer.json" | tee -a "$LOGFILE"
+        fi
+
+        # Model PT
+        if [ -n "$PT_PATH" ] && [ -f "$PT_PATH" ]; then
+          cp "$PT_PATH" /tmp/final.pt
+          echo "[PIPELINE] Copied model_pt -> /tmp/final.pt" | tee -a "$LOGFILE"
+        else
+          echo "[PIPELINE][ERROR] model_pt not found at $PT_PATH" | tee -a "$LOGFILE"
+          exit 2
+        fi
+
+        # Config JSON (optional)
+        if [ -n "$CFG_JSON_PATH" ] && [ -f "$CFG_JSON_PATH" ]; then
+          cp "$CFG_JSON_PATH" /tmp/gptneox_config.json
+          echo "[PIPELINE] Copied model_config_json -> /tmp/gptneox_config.json" | tee -a "$LOGFILE"
+        fi
+
+        # Model py (optional)
+        if [ -n "$MODEL_PY_IN" ]; then
+          if [ -f "$MODEL_PY_IN" ]; then
+            cp "$MODEL_PY_IN" /tmp/model_py_in.py
+            echo "[PIPELINE] Copied model_py_in -> /tmp/model_py_in.py" | tee -a "$LOGFILE"
+          elif [ -d "$MODEL_PY_IN" ]; then
+            cp -r "$MODEL_PY_IN" /tmp/model_py_in
+            echo "[PIPELINE] Copied model_py_in dir -> /tmp/model_py_in" | tee -a "$LOGFILE"
+          fi
+        fi
+
+        cat >/tmp/build_hf_neox_folder_dynamic.py <<'PY'
+#!/usr/bin/env python3
+import os, re, json, shutil, torch
+from collections import OrderedDict
+
+SRC_PT = "/tmp/final.pt"
+TOKENIZER_JSON = "/tmp/tokenizer.json" if os.path.exists("/tmp/tokenizer.json") else None
+BASE_CFG_JSON = "/tmp/gptneox_config.json" if os.path.exists("/tmp/gptneox_config.json") else None
+MODEL_DIR = os.environ.get("OUT_MODEL_DIR", "/tmp/hf_model")
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+print("[CONVERT] Loading checkpoint:", SRC_PT)
+sd = torch.load(SRC_PT, map_location="cpu")
+if isinstance(sd, dict) and "state_dict" in sd:
+    sd = sd["state_dict"]
+if not any(k.startswith("gpt_neox.") for k in sd):
+    # if keys are not gpt_neox.*, attempt to map common variants (best-effort)
+    print("[CONVERT] Warning: checkpoint keys do not start with 'gpt_neox.'; proceeding anyway.")
+
+out = OrderedDict(sd)
+
+# rename final layernorm keys if necessary
+if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
+    out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
+    if "gpt_neox.final_layernorm.bias" in out:
+        out["gpt_neox.final_layer_norm.bias"]   = out.pop("gpt_neox.final_layernorm.bias")
+
+# ensure embed_out exists or mirror from embed_in
+if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
+    out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
+
+# add missing biases for attention and dense layers
+layer_ids = sorted({int(m.group(1)) for k in out.keys()
+                    for m in [re.match(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)] if m})
+for i in layer_ids:
+    wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
+    wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
+    if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
+        out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
+    if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
+        out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
+
+# Save pytorch_model.bin
+torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+print("[CONVERT] Wrote pytorch_model.bin to", MODEL_DIR)
+
+# infer basic config values from weights
+vocab_size = None
+hidden_size = None
+num_layers = None
+intermediate_size = None
+for k in out.keys():
+    if k.endswith("embed_in.weight"):
+        vocab_size, hidden_size = out[k].shape
+        break
+
+layer_nums = [int(re.search(r"gpt_neox\.layers\.(\d+)\.", k).group(1))
+              for k in out if k.startswith("gpt_neox.layers.")]
+num_layers = 1 + max(layer_nums) if layer_nums else int(os.environ.get("NUM_LAYERS", 1))
+
+if "gpt_neox.layers.0.mlp.dense_h_to_4h.weight" in out:
+    intermediate_size = out["gpt_neox.layers.0.mlp.dense_h_to_4h.weight"].shape[0]
+else:
+    intermediate_size = int(os.environ.get("INTERMEDIATE_SIZE", max(4*hidden_size//1, hidden_size*4)))
+
+def infer_heads(hid):
+    for h in [32, 16, 8, 24, 12, 4, 2]:
+        if hid % h == 0: return h
+    return max(1, hid // 64) or 8
+
+def detect_tie(sd_map):
+    try:
+        return sd_map.get("gpt_neox.embed_out.weight") is sd_map.get("gpt_neox.embed_in.weight")
+    except Exception:
+        return False
+
+# read base cfg if present
+cfg = {}
+if BASE_CFG_JSON and os.path.exists(BASE_CFG_JSON):
+    try:
+        with open(BASE_CFG_JSON) as f: cfg = json.load(f)
+    except Exception:
+        cfg = {}
+
+num_heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or (infer_heads(hidden_size) if hidden_size else 16))
+max_pos = int(cfg.get("max_position_embeddings") or cfg.get("max_seq_len") or 512)
+rotary_pct = float(cfg.get("rotary_pct", 0.25))
+rotary_base = float(cfg.get("rotary_emb_base", 10000.0))
+use_parallel_residual = bool(cfg.get("use_parallel_residual", False))
+layer_norm_eps = float(cfg.get("layer_norm_eps", 1e-5))
+hidden_act = str(cfg.get("hidden_act", "gelu"))
+tie_word_embeddings = bool(cfg.get("tie_word_embeddings", detect_tie(out)))
+
+hf_cfg = {
+    "architectures": ["GPTNeoXForCausalLM"],
+    "model_type": "gpt_neox",
+    "vocab_size": int(vocab_size) if vocab_size else 50257,
+    "hidden_size": int(hidden_size) if hidden_size else 2048,
+    "intermediate_size": int(intermediate_size),
+    "num_attention_heads": int(num_heads),
+    "num_hidden_layers": int(num_layers),
+    "max_position_embeddings": int(max_pos),
+    "rotary_pct": rotary_pct,
+    "rotary_emb_base": rotary_base,
+    "use_parallel_residual": use_parallel_residual,
+    "layer_norm_eps": layer_norm_eps,
+    "hidden_act": hidden_act,
+    "tie_word_embeddings": tie_word_embeddings,
+}
+
+with open(os.path.join(MODEL_DIR, "config.json"), "w") as f:
+    json.dump(hf_cfg, f, indent=2)
+print("[CONVERT] Wrote config.json")
+
+# remove duplicate embed_out if tied
+if tie_word_embeddings and "gpt_neox.embed_out.weight" in out:
+    # remove large duplicate key and save smaller state
+    out.pop("gpt_neox.embed_out.weight", None)
+    torch.save(out, os.path.join(MODEL_DIR, "pytorch_model.bin"))
+
+# write tokenizer_config.json and special tokens
+tok_cfg = {
+    "model_max_length": hf_cfg["max_position_embeddings"],
+    "pad_token_id": 0, "unk_token_id": 1, "bos_token_id": 2, "eos_token_id": 3
+}
+with open(os.path.join(MODEL_DIR, "tokenizer_config.json"), "w") as f:
+    json.dump(tok_cfg, f, indent=2)
+
+spec_map = {"pad_token": "[PAD]", "unk_token": "[UNK]", "bos_token": "[BOS]", "eos_token": "[EOS]"}
+with open(os.path.join(MODEL_DIR, "special_tokens_map.json"), "w") as f:
+    json.dump(spec_map, f, indent=2)
+
+gen_cfg = {"max_length": hf_cfg["max_position_embeddings"], "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
+with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
+    json.dump(gen_cfg, f, indent=2)
+
+# copy tokenizer.json if exists at /tmp/tokenizer.json
+if TOKENIZER_JSON and os.path.exists(TOKENIZER_JSON):
+    shutil.copy2(TOKENIZER_JSON, os.path.join(MODEL_DIR, "tokenizer.json"))
+
+print("[CONVERT] Conversion complete. Model folder:", MODEL_DIR)
+PY
+
+        echo "[PIPELINE] Running converter..."
+        # set environment variable so converter can read desired output dir
+        export OUT_MODEL_DIR="$OUT_MODEL_DIR"
+        python3 -u /tmp/build_hf_neox_folder_dynamic.py 2>&1 | tee -a "$LOGFILE"
+
+        ###############################################################################
+        # 2) Write evaluation script (robust per-task harness w/ gpqa preload + CO2)
+        ###############################################################################
+        cat >/tmp/eval_benchmarks.py <<'PY'
+#!/usr/bin/env python3
+import os, json, time, traceback, re
+import numpy as np, torch
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from lm_eval import evaluator
+from codecarbon import EmissionsTracker
+
+# config from env / args
+MODEL_DIR = os.environ.get("OUT_MODEL_DIR", "/tmp/hf_model")
+CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/hf_cache")
+TASKS_CSV = os.environ.get("TASKS_CSV", "mmlu_pro,bbh,math,ifeval,gpqa")
+MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "64"))
+OUT_COMPACT = os.environ.get("OUT_COMPACT", "/tmp/metrics_compact.json")
+OUT_FULL = os.environ.get("OUT_FULL", "/tmp/metrics_full.json")
+OUT_EMISSIONS = os.environ.get("OUT_EMISSIONS", "/tmp/emissions.csv")
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+TASKS = [t.strip() for t in TASKS_CSV.split(",") if t.strip()]
+
+# preload helper (for gpqa specifically)
+PRELOAD_MAP = {
+    "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
+}
+
+def _preload_for_task(task):
+    task_key = task.lower()
+    entries = PRELOAD_MAP.get(task_key)
+    if not entries:
+        return False
+    ok = False
+    for repo, split in entries:
+        try:
+            try:
+                load_dataset(repo, split, cache_dir=CACHE_DIR, token=os.environ.get("HUGGINGFACE_HUB_TOKEN"))
+            except TypeError:
+                load_dataset(repo, split, cache_dir=CACHE_DIR, use_auth_token=os.environ.get("HUGGINGFACE_HUB_TOKEN"))
+            ok = True
+            print(f"[EVAL] Preloaded {repo}::{split}")
+        except Exception as e:
+            print(f"[EVAL] Preload failed for {repo}::{split}: {e}")
+    return ok
+
+# Start CO2 tracker
+tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
+tracker.start()
+
+# sanity load tokenizer + model (lm_eval will load model via model_args)
+print("[EVAL] Sanity loading tokenizer + model from:", MODEL_DIR)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=False)
+_ = AutoModelForCausalLM.from_pretrained(MODEL_DIR, trust_remote_code=False)
+
+# device info
+if torch.cuda.is_available():
+    print("[EVAL] CUDA available")
+    print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES", "all"))
+    for i in range(torch.cuda.device_count()):
+        try:
+            print(f"  GPU {i}:", torch.cuda.get_device_name(i))
+        except Exception:
+            print(f"  GPU {i}: <unknown>")
+    eval_device = "cuda:0"
+else:
+    print("[EVAL] CUDA not available - using cpu")
+    eval_device = "cpu"
+
+# json helpers
+def safe_json(obj):
+    if isinstance(obj, dict): return {k: safe_json(v) for k,v in obj.items()}
+    if isinstance(obj, (list, tuple)): return [safe_json(v) for v in obj]
+    try:
+        if hasattr(obj, "item"): return obj.item()
+    except Exception:
+        pass
+    if isinstance(obj, np.ndarray): return obj.tolist()
+    return obj
+
+def pick_metric(d):
+    for k in ("acc_norm","acc","accuracy"):
+        if k in d and isinstance(d[k], (int,float)):
+            return k, float(d[k])
+    for k,v in d.items():
+        if isinstance(v,(int,float)):
+            return k, float(v)
+    return None, None
+
+compact = {}
+full = {}
+
+for task in TASKS:
+    print(f"[EVAL] Running task: {task}")
+    _preload_for_task(task)
+    start = time.time()
+    try:
+        res = evaluator.simple_evaluate(
+            model="hf",
+            model_args=f"pretrained={MODEL_DIR},tokenizer={MODEL_DIR},trust_remote_code=False",
+            tasks=[task],
+            batch_size="auto:1",
+            device=eval_device,
+            num_fewshot=0,
+            limit=None,
+        )
+        elapsed = time.time() - start
+        full[task] = safe_json(res)
+        results_dict = res.get("results", {})
+        task_result = results_dict.get(task) or next(iter(results_dict.values()), None)
+        if isinstance(task_result, dict):
+            metric_name, metric_value = pick_metric(task_result)
+            if metric_name:
+                compact[task] = {metric_name: metric_value, "time_s": round(elapsed,3)}
+                print(f"[EVAL] {task}: {metric_name}={metric_value} (time {elapsed:.1f}s)")
+            else:
+                compact[task] = {"note": "no numeric metric", "time_s": round(elapsed,3)}
+                print(f"[EVAL] {task}: no numeric metric found")
+        else:
+            compact[task] = {"note": "unexpected result structure", "time_s": round(elapsed,3)}
+            print(f"[EVAL] {task}: unexpected result structure")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[EVAL] Task {task} failed: {e}")
+        compact[task] = {"error": str(e)}
+        full[task] = {"error": str(e), "traceback": tb}
+
+# stop CO2 tracker
+emissions = tracker.stop()
+
+compact["co2_emissions_kg"] = float(emissions)
+full["co2_emissions_kg"] = float(emissions)
+
+# save outputs
+with open(OUT_COMPACT, "w") as f:
+    json.dump(safe_json(compact), f, indent=2)
+with open(OUT_FULL, "w") as f:
+    json.dump(safe_json(full), f, indent=2)
+
+print("[EVAL] Saved compact metrics to", OUT_COMPACT)
+print("[EVAL] Saved full results to", OUT_FULL)
+print("[EVAL] Emissions written to", OUT_EMISSIONS)
+PY
+
+        echo "[PIPELINE] Running evaluation..."
+        # export env so eval script can pick them up
+        export OUT_MODEL_DIR="$OUT_MODEL_DIR"
+        export CACHE_DIR="$CACHE_DIR"
+        export TASKS_CSV="$TASKS_CSV"
+        export MAX_NEW_TOKENS="$MAX_NEW_TOKENS"
+        export OUT_COMPACT="/tmp/metrics_compact.json"
+        export OUT_FULL="/tmp/metrics_full.json"
+        export OUT_EMISSIONS="/tmp/emissions.csv"
+
+        python3 -u /tmp/eval_benchmarks.py 2>&1 | tee -a "$LOGFILE"
+
+        # Copy outputs to pipeline mount points (expected by pipeline system)
+        # The pipeline executor should map these to the declared outputs.
+        cp /tmp/metrics_compact.json /tmp/out_compact.json || true
+        cp /tmp/metrics_full.json /tmp/out_full.json || true
+        cp /tmp/emissions.csv /tmp/out_emissions.csv || true
+        echo "[PIPELINE] Done. Logs at $LOGFILE"
+      - _
+    args:
+      - {inputValue: hf_token}
+      - {inputPath: tokenizer_json}
+      - {inputPath: model_pt}
+      - {inputPath: model_config_json}
+      - {inputPath: model_py_in}
+      - {inputValue: tasks}
+      - {inputValue: cache_dir}
+      - {inputValue: output_model_dir}
+      - {inputValue: max_new_tokens}
+    - {outputPath: converted_model, path: /tmp/hf_model}
+    - {outputPath: compact_metrics_json, path: /tmp/metrics_compact.json}
+    - {outputPath: full_results_json, path: /tmp/metrics_full.json}
+    - {outputPath: emissions_csv, path: /tmp/emissions.csv}
+    - {outputPath: logs, path: /tmp/convert_and_eval.log}
