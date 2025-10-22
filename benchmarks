@@ -23,7 +23,7 @@ inputs:
     default: "/tmp/hf_model"
   - name: max_new_tokens
     type: Integer
-    default: 64
+    default: "64"
 
 outputs:
   - name: converted_model
