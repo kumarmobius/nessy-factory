@@ -1,4 +1,4 @@
-name: Benchmarks
+name: EvalBenchmarks
 description: |
   Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
   Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
@@ -49,12 +49,12 @@ implementation:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
       - bash
-      - -eu
-      - -c
+      - -lc
       - |
-        set -o pipefail
-        echo "[BOOT] Ensure lm_eval and codecarbon are installed (system or --user)"
+        set -euo pipefail
+        echo "[BOOT] Installing required Python packages (lm_eval, codecarbon)..."
         PIP="python3 -m pip"
+        # Try system-wide quiet install first; if it fails (permissions), retry with --user
         PIP_DISABLE_PIP_VERSION_CHECK=1 $PIP install --quiet --no-warn-script-location lm_eval codecarbon \
           || PIP_DISABLE_PIP_VERSION_CHECK=1 $PIP install --user --quiet --no-warn-script-location lm_eval codecarbon
         export PATH="$HOME/.local/bin:$PATH"
@@ -74,52 +74,50 @@ implementation:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from lm_eval import evaluator
         from codecarbon import EmissionsTracker
-
-        parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks (no MuSR)")
-        parser.add_argument("--converted_model", required=True, help="Path to converted HF model folder")
-        parser.add_argument("--hf_token", default="", help="Hugging Face token (optional)")
-        parser.add_argument("--cache_dir", default="/tmp/hf_cache", help="HF cache directory")
-        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval", help="Comma-separated tasks")
-        parser.add_argument("--max_new_tokens", type=int, default=64, help="max new tokens (for generation calls)")
-        parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json", help="compact summary output")
-        parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json", help="full results output")
-        parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv", help="emissions CSV output")
+        
+        parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
+        parser.add_argument("--converted_model", required=True)
+        parser.add_argument("--hf_token", default="")
+        parser.add_argument("--cache_dir", default="/tmp/hf_cache")
+        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
+        parser.add_argument("--max_new_tokens", type=int, default=64)
+        parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
+        parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
+        parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
         args = parser.parse_args()
-
+        
         CONVERTED = os.path.abspath(args.converted_model)
         CACHE = os.path.abspath(args.cache_dir)
         OUT_COMPACT = os.path.abspath(args.out_compact)
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
-
-        # Ensure output dirs exist
+        
+        # Make sure output dirs exist
         for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
             if p:
                 os.makedirs(p, exist_ok=True)
-
-        # Save HF token if provided
+        
         TOKEN = args.hf_token or ""
         if TOKEN:
             os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
             os.environ["HF_TOKEN"] = TOKEN
             HfFolder.save_token(TOKEN)
             print("[EVAL] Saved HF token for gated dataset access")
-
-        # HF cache / telemetry envs
+        
         os.environ.update({
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "HF_HOME": CACHE,
             "HF_DATASETS_CACHE": CACHE,
             "HUGGINGFACE_HUB_CACHE": CACHE
         })
-
+        
         TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
-        COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]  # MuSR removed
-
+        COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
+        
         PRELOAD_MAP = {
             "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
         }
-
+        
         def _preload_for_task(task):
             task_key = task.lower()
             entries = PRELOAD_MAP.get(task_key)
@@ -138,18 +136,16 @@ implementation:
                 except Exception as e:
                     print("[EVAL] Preload failed for {}::{}: {}".format(repo, split, e))
             return ok_any
-
-        # Start emissions tracker
+        
+        # Start CO2 tracker; file will be created in OUT_EMISSIONS dir
         emissions_out_dir = os.path.dirname(OUT_EMISSIONS) or "."
         tracker = EmissionsTracker(output_dir=emissions_out_dir, output_file=os.path.basename(OUT_EMISSIONS))
         tracker.start()
-
-        # Sanity-load tokenizer + model
+        
         print("[EVAL] Loading tokenizer + model from:", CONVERTED)
         tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
         _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
-
-        # Decide device string for lm_eval
+        
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             print("[EVAL] CUDA visible devices: {}".format(os.environ.get("CUDA_VISIBLE_DEVICES", "all")))
@@ -169,8 +165,7 @@ implementation:
             print("[EVAL] CUDA not available — using CPU")
             eval_device = "cpu"
         print("[EVAL] Using device string for lm_eval: {}".format(eval_device))
-
-        # Helpers
+        
         def safe_json(obj):
             if isinstance(obj, dict):
                 return {k: safe_json(v) for k, v in obj.items()}
@@ -190,7 +185,7 @@ implementation:
                 return obj
             except Exception:
                 return str(obj)
-
+        
         def pick_metric(d):
             for k in ("acc_norm", "acc", "accuracy"):
                 if k in d and isinstance(d[k], (int, float)):
@@ -199,15 +194,14 @@ implementation:
                 if isinstance(v, (int, float)):
                     return k, float(v)
             return None, None
-
+        
         compact_results = {}
         full_results = {}
-
-        # Run tasks sequentially; continue on errors and record them
+        
         for task in TASKS:
             print("\n[EVAL] Running task: {}".format(task))
             _preload_for_task(task)
-
+        
             start_t = time.time()
             try:
                 model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
@@ -222,10 +216,10 @@ implementation:
                 )
                 duration = time.time() - start_t
                 full_results[task] = safe_json(res)
-
+        
                 results_dict = res.get("results", {})
                 task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
-
+        
                 if isinstance(task_result, dict):
                     metric_name, metric_value = pick_metric(task_result)
                     if metric_name is not None:
@@ -237,20 +231,20 @@ implementation:
                 else:
                     compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
                     print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, duration))
-
+        
             except Exception as e:
                 duration = time.time() - start_t
                 tb = traceback.format_exc()
-                print("[EVAL] Task {} failed with exception:\\n{}".format(task, tb))
+                print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
                 compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
                 full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
-
-        # Stop emissions tracker and write outputs
+        
+        # Stop emissions tracker
         emissions = tracker.stop()
         compact_results["co2_emissions_kg"] = float(emissions)
         full_results["co2_emissions_kg"] = float(emissions)
-
-        # compute composite mean over COMPOSITE_GROUP
+        
+        # Compute composite mean
         found_vals = []
         for t in COMPOSITE_GROUP:
             entry = compact_results.get(t)
@@ -264,16 +258,16 @@ implementation:
         if found_vals:
             composite_score = float(np.mean(found_vals))
             compact_results["composite_mean"] = round(composite_score, 6)
-            print("\\n[EVAL] Composite mean over {}: {:.6f}".format(COMPOSITE_GROUP, composite_score))
+            print("\n[EVAL] Composite mean over {}: {:.6f}".format(COMPOSITE_GROUP, composite_score))
         else:
-            print("\\n[EVAL] No numeric values found for composite computation.")
-
+            print("\n[EVAL] No numeric values found for composite computation.")
+        
         # Write outputs
         with open(OUT_COMPACT, "w") as f:
             json.dump(safe_json(compact_results), f, indent=2)
         with open(OUT_FULL, "w") as f:
             json.dump(safe_json(full_results), f, indent=2)
-
+        
         print("[EVAL] Saved compact summary to:", OUT_COMPACT)
         print("[EVAL] Saved full results to:", OUT_FULL)
         print("[EVAL] Emissions CSV path (written by codecarbon):", OUT_EMISSIONS)
@@ -281,7 +275,6 @@ implementation:
 
         echo "[BOOT] Running evaluation script..."
         python3 -u /tmp/eval_benchmarks.py "$@"
-
     args:
       - --converted_model
       - {inputPath: converted_model}
