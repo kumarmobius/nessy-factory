@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: EvalBenchmark
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -43,8 +43,10 @@ implementation:
       - bash
       - -lc
       - |
-        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location lm-eval codecarbon \
-         || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location lm-eval codecarbon --user)
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          lm-eval codecarbon "torch>=2.6.0" safetensors \
+          || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          lm-eval codecarbon "torch>=2.6.0" safetensors --user
 
         cat > /tmp/hf_eval.py <<'PY'
         import argparse
@@ -59,6 +61,8 @@ implementation:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from lm_eval import evaluator
         from codecarbon import EmissionsTracker
+
+        print('torch', torch.__version__)
   
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
