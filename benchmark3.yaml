@@ -40,6 +40,11 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
+      - sh
+      - c
+      - (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location
+        'lm_eval' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet
+        --no-warn-script-location 'codecarbon' --user) && "$0" "$@"
       - python3
       - -u
       - -c
