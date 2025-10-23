@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: EvalBenchmarks
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -264,7 +264,7 @@ implementation:
   
         log("hf_eval script completed")
         PY
-        exec python3 -u /tmp/hf_eval.py "$@" "$0"
+        exec python3 -u /tmp/hf_eval.py "$0" "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
