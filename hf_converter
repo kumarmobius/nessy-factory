@@ -33,7 +33,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v23gpu
+    image: nikhilv215/nesy-factory:v22
     command:
       - python3
       - -u
