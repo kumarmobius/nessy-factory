@@ -1,33 +1,33 @@
-name: Benchmarks
+name: HFConvertor
 description: |
-  Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
-  Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
-  Returns compact + full JSON results and an emissions CSV.
+  Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
+  Uses named argparse flags only (no positional args, no env reliance). No try/except blocks.
 
 inputs:
   - name: converted_model
     type: Model
-    description: Path to converted HF model folder (artifact directory)
+    description: Path to tokenizer JSON file (optional)
   - name: hf_token
     type: String
     default: ""
-    description: Hugging Face token (optional, if dataset is gated)
-  - name: cache_dir
-    type: String
-    default: /tmp/hf_cache
-    description: HF cache dir for datasets / hub
+    description: Path to model PyTorch checkpoint file (required)
   - name: tasks
     type: String
     default: "gpqa,mmlu_pro,bbh,math,ifeval"
-    description: Comma-separated lm-eval task names
+    description: Path to model config JSON file (optional)
+  - name: cache_dir
+    type: String
+    default: /tmp/hf_cache
+    description: Cache directory for conversion
   - name: max_new_tokens
     type: Integer
     default: "64"
-    description: Max new tokens for generation (passed as context to LM when needed)
+    description: Output model directory (HF-format)
   - name: out_compact
     type: Data
     default: /tmp/outputs/benchmark_compact.json
-  - name: out_full
+    description: Maximum new tokens (kept for parity)
+  - name : out_full
     type: Data
     default: /tmp/outputs/benchmark_full.json
   - name: out_emissions
@@ -48,20 +48,10 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
-      - bash
-      - -lc
+      - python3
+      - -u
+      - -c
       - |
-        set -euo pipefail
-        echo "[BOOT] Installing required Python packages (lm_eval, codecarbon)..."
-        PIP="python3 -m pip"
-        # Try system-wide quiet install first; if it fails (permissions), retry with --user
-        PIP_DISABLE_PIP_VERSION_CHECK=1 $PIP install --quiet --no-warn-script-location lm_eval codecarbon \
-          || PIP_DISABLE_PIP_VERSION_CHECK=1 $PIP install --user --quiet --no-warn-script-location lm_eval codecarbon
-        export PATH="$HOME/.local/bin:$PATH"
-        echo "[BOOT] Writing eval script to /tmp/eval_benchmarks.py"
-
-        cat > /tmp/eval_benchmarks.py <<'PY'
-        #!/usr/bin/env python3
         import argparse
         import os
         import json
@@ -92,7 +82,7 @@ implementation:
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
         
-        # Make sure output dirs exist
+        # Ensure output and cache dirs exist
         for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
             if p:
                 os.makedirs(p, exist_ok=True)
@@ -137,7 +127,7 @@ implementation:
                     print("[EVAL] Preload failed for {}::{}: {}".format(repo, split, e))
             return ok_any
         
-        # Start CO2 tracker; file will be created in OUT_EMISSIONS dir
+        # Start emissions tracker (file will be written to OUT_EMISSIONS dir)
         emissions_out_dir = os.path.dirname(OUT_EMISSIONS) or "."
         tracker = EmissionsTracker(output_dir=emissions_out_dir, output_file=os.path.basename(OUT_EMISSIONS))
         tracker.start()
@@ -198,46 +188,46 @@ implementation:
         compact_results = {}
         full_results = {}
         
-        # for task in TASKS:
-        #     print("\n[EVAL] moddak: {}".format(task))
-        #     _preload_for_task(task)
+        for task in TASKS:
+            print("\n[EVAL] Running task: {}".format(task))
+            _preload_for_task(task)
         
-        #     start_t = time.time()
-        #     try:
-        #         model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
-        #         res = evaluator.simple_evaluate(
-        #             model="hf",
-        #             model_args=model_args_str,
-        #             tasks=[task],
-        #             batch_size="auto:1",
-        #             device=eval_device,
-        #             num_fewshot=0,
-        #             limit=None,
-        #         )
-        #         duration = time.time() - start_t
-        #         full_results[task] = safe_json(res)
+            start_t = time.time()
+            try:
+                model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
+                res = evaluator.simple_evaluate(
+                    model="hf",
+                    model_args=model_args_str,
+                    tasks=[task],
+                    batch_size="auto:1",
+                    device=eval_device,
+                    num_fewshot=0,
+                    limit=None,
+                )
+                duration = time.time() - start_t
+                full_results[task] = safe_json(res)
         
-        #         results_dict = res.get("results", {})
-        #         task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
+                results_dict = res.get("results", {})
+                task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
         
-        #         if isinstance(task_result, dict):
-        #             metric_name, metric_value = pick_metric(task_result)
-        #             if metric_name is not None:
-        #                 compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
-        #                 print("[EVAL] {}: {} = {}  (time {:.1f}s)".format(task, metric_name, metric_value, duration))
-        #             else:
-        #                 compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
-        #                 print("[EVAL] {}: no numeric metric found  (time {:.1f}s)".format(task, duration))
-        #         else:
-        #             compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
-        #             print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, duration))
+                if isinstance(task_result, dict):
+                    metric_name, metric_value = pick_metric(task_result)
+                    if metric_name is not None:
+                        compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
+                        print("[EVAL] {}: {} = {}  (time {:.1f}s)".format(task, metric_name, metric_value, duration))
+                    else:
+                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
+                        print("[EVAL] {}: no numeric metric found  (time {:.1f}s)".format(task, duration))
+                else:
+                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
+                    print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, duration))
         
-        #     except Exception as e:
-        #         duration = time.time() - start_t
-        #         tb = traceback.format_exc()
-        #         print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
-        #         compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
-        #         full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
+            except Exception as e:
+                duration = time.time() - start_t
+                tb = traceback.format_exc()
+                print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
+                compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
+                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
         
         # Stop emissions tracker
         emissions = tracker.stop()
@@ -255,6 +245,7 @@ implementation:
                     if isinstance(v, (int, float)):
                         found_vals.append(float(v))
                         break
+        
         if found_vals:
             composite_score = float(np.mean(found_vals))
             compact_results["composite_mean"] = round(composite_score, 6)
@@ -271,10 +262,6 @@ implementation:
         print("[EVAL] Saved compact summary to:", OUT_COMPACT)
         print("[EVAL] Saved full results to:", OUT_FULL)
         print("[EVAL] Emissions CSV path (written by codecarbon):", OUT_EMISSIONS)
-        PY
-
-        echo "[BOOT] Running evaluation script..."
-        python3 -u /tmp/eval_benchmarks.py "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
