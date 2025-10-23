@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: Benchmarskk
 description: |
   Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
   Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
@@ -23,7 +23,7 @@ inputs:
   - name: max_new_tokens
     type: Integer
     default: "64"
-    description: Max new tokens for generation (passed as context to LM when needed)
+    description: Max new tokens for generation
   - name: out_compact
     type: Data
     default: /tmp/outputs/benchmark_compact.json
@@ -48,10 +48,10 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
-      - python3
-      - -u
+      - /bin/bash
       - -c
       - |
+        cat > /tmp/eval_script.py << 'PYTHON_SCRIPT_END'
         import argparse
         import os
         import json
@@ -257,7 +257,7 @@ implementation:
         print(f"[EVAL] Saved compact summary to: {OUT_COMPACT}")
         print(f"[EVAL] Saved full results to: {OUT_FULL}")
         print(f"[EVAL] Emissions CSV at: {OUT_EMISSIONS}")
-        EOF
+        PYTHON_SCRIPT_END
         
         python3 /tmp/eval_script.py "$@"
     args:
@@ -277,4 +277,3 @@ implementation:
       - {outputPath: full_results}
       - --out_emissions
       - {outputPath: emissions_csv}
-      - {outputPath: logs}
