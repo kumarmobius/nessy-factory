@@ -198,46 +198,46 @@ implementation:
         compact_results = {}
         full_results = {}
         
-        for task in TASKS:
-            print("\n[EVAL] Running task: {}".format(task))
-            _preload_for_task(task)
+        # for task in TASKS:
+        #     print("\n[EVAL] Running task: {}".format(task))
+        #     _preload_for_task(task)
         
-            start_t = time.time()
-            try:
-                model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
-                res = evaluator.simple_evaluate(
-                    model="hf",
-                    model_args=model_args_str,
-                    tasks=[task],
-                    batch_size="auto:1",
-                    device=eval_device,
-                    num_fewshot=0,
-                    limit=None,
-                )
-                duration = time.time() - start_t
-                full_results[task] = safe_json(res)
+        #     start_t = time.time()
+        #     try:
+        #         model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
+        #         res = evaluator.simple_evaluate(
+        #             model="hf",
+        #             model_args=model_args_str,
+        #             tasks=[task],
+        #             batch_size="auto:1",
+        #             device=eval_device,
+        #             num_fewshot=0,
+        #             limit=None,
+        #         )
+        #         duration = time.time() - start_t
+        #         full_results[task] = safe_json(res)
         
-                results_dict = res.get("results", {})
-                task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
+        #         results_dict = res.get("results", {})
+        #         task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
         
-                if isinstance(task_result, dict):
-                    metric_name, metric_value = pick_metric(task_result)
-                    if metric_name is not None:
-                        compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
-                        print("[EVAL] {}: {} = {}  (time {:.1f}s)".format(task, metric_name, metric_value, duration))
-                    else:
-                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
-                        print("[EVAL] {}: no numeric metric found  (time {:.1f}s)".format(task, duration))
-                else:
-                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
-                    print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, duration))
+        #         if isinstance(task_result, dict):
+        #             metric_name, metric_value = pick_metric(task_result)
+        #             if metric_name is not None:
+        #                 compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
+        #                 print("[EVAL] {}: {} = {}  (time {:.1f}s)".format(task, metric_name, metric_value, duration))
+        #             else:
+        #                 compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
+        #                 print("[EVAL] {}: no numeric metric found  (time {:.1f}s)".format(task, duration))
+        #         else:
+        #             compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
+        #             print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, duration))
         
-            except Exception as e:
-                duration = time.time() - start_t
-                tb = traceback.format_exc()
-                print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
-                compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
-                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
+        #     except Exception as e:
+        #         duration = time.time() - start_t
+        #         tb = traceback.format_exc()
+        #         print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
+        #         compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
+        #         full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
         
         # Stop emissions tracker
         emissions = tracker.stop()
