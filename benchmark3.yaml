@@ -22,7 +22,7 @@ inputs:
     description: Comma-separated lm-eval task names
   - name: max_new_tokens
     type: Integer
-    default: 64
+    default: "64"
     description: Max new tokens for generation
   - name: out_compact
     type: Data
