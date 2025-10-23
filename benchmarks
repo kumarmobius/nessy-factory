@@ -22,7 +22,7 @@ inputs:
     description: Comma-separated lm-eval task names
   - name: max_new_tokens
     type: Integer
-    default: 64
+    default: "64"
     description: Max new tokens for generation (passed as context to LM when needed)
   - name: out_compact
     type: Data
@@ -66,7 +66,6 @@ implementation:
         from codecarbon import EmissionsTracker
         import sys
 
-        # Argument parsing
         parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
         parser.add_argument("--converted_model", required=True)
         parser.add_argument("--hf_token", default="")
@@ -83,7 +82,6 @@ implementation:
         OUT_COMPACT = os.path.abspath(args.out_compact)
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
-        
         safe_paths = [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]
         for p in safe_paths:
             if p:
@@ -137,7 +135,24 @@ implementation:
         tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
         _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
 
-        eval_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            print(f"[EVAL] CUDA visible devices: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+            print(f"[EVAL] torch reports {gpu_count} CUDA device(s).")
+            for i in range(gpu_count):
+                try:
+                    name = torch.cuda.get_device_name(i)
+                except Exception:
+                    name = "<unknown>"
+                try:
+                    cap = torch.cuda.get_device_capability(i)
+                except Exception:
+                    cap = ("?", "?")
+                print(f"  GPU {i}: {name}  |  capability: {cap}")
+            eval_device = "cuda:0"
+        else:
+            print("[EVAL] CUDA not available — using CPU")
+            eval_device = "cpu"
         print(f"[EVAL] Using device string for lm_eval: {eval_device}")
 
         def safe_json(obj):
@@ -160,6 +175,15 @@ implementation:
             except Exception:
                 return str(obj)
 
+        def pick_metric(d):
+            for k in ("acc_norm", "acc", "accuracy"):
+                if k in d and isinstance(d[k], (int, float)):
+                    return k, float(d[k])
+            for k, v in d.items():
+                if isinstance(v, (int, float)):
+                    return k, float(v)
+            return None, None
+
         compact_results = {}
         full_results = {}
 
@@ -169,12 +193,13 @@ implementation:
 
             start_t = time.time()
             try:
+                model_args_str = f"pretrained={CONVERTED},tokenizer={CONVERTED},trust_remote_code=False"
                 res = evaluator.simple_evaluate(
                     model="hf",
-                    model_args=f"pretrained={CONVERTED},tokenizer={CONVERTED},trust_remote_code=False",
+                    model_args=model_args_str,
                     tasks=[task],
                     batch_size="auto:1",
-                    device=eval_device,
+                    device="cuda:0" if torch.cuda.is_available() else "cpu",
                     num_fewshot=0,
                     limit=None,
                 )
@@ -189,16 +214,40 @@ implementation:
                     if metric_name is not None:
                         compact_results[task] = {metric_name: metric_value, "time_s": round(dur, 3)}
                         print(f"[EVAL] {task}: {metric_name} = {metric_value}  (time {dur:.1f}s)")
+                    else:
+                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(dur, 3)}
+                        print(f"[EVAL] {task}: no numeric metric found  (time {dur:.1f}s)")
+                else:
+                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(dur,3)}
+                    print(f"[EVAL] {task}: unexpected result structure  (time {dur:.1f}s)")
 
             except Exception as e:
                 dur = time.time() - start_t
-                print(f"[EVAL] Task {task} failed with exception:\n{e}")
+                tb = traceback.format_exc()
+                print(f"[EVAL] Task {task} failed with exception:\n{tb}")
                 compact_results[task] = {"error": str(e), "time_s": round(dur, 3)}
-                full_results[task] = {"error": str(e), "traceback": traceback.format_exc(), "time_s": round(dur, 3)}
+                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(dur, 3)}
 
         emissions = tracker.stop()
         compact_results["co2_emissions_kg"] = float(emissions)
         full_results["co2_emissions_kg"] = float(emissions)
+
+        found_vals = []
+        for t in COMPOSITE_GROUP:
+            entry = compact_results.get(t)
+            if isinstance(entry, dict):
+                for k, v in entry.items():
+                    if k == "time_s" or k.startswith("note") or k=="error":
+                        continue
+                    if isinstance(v, (int, float)):
+                        found_vals.append(float(v))
+                        break
+        if found_vals:
+            composite_score = float(np.mean(found_vals))
+            compact_results["composite_mean"] = round(composite_score, 6)
+            print(f"\n[EVAL] Composite mean over {COMPOSITE_GROUP}: {composite_score:.6f}")
+        else:
+            print("\n[EVAL] No numeric values found for composite computation.")
 
         with open(OUT_COMPACT, "w") as f:
             json.dump(safe_json(compact_results), f, indent=2)
@@ -208,7 +257,9 @@ implementation:
         print(f"[EVAL] Saved compact summary to: {OUT_COMPACT}")
         print(f"[EVAL] Saved full results to: {OUT_FULL}")
         print(f"[EVAL] Emissions CSV at: {OUT_EMISSIONS}")
-      EOF
+        EOF
+        
+        python3 /tmp/eval_script.py "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
@@ -225,3 +276,5 @@ implementation:
       - --out_full
       - {outputPath: full_results}
       - --out_emissions
+      - {outputPath: emissions_csv}
+      - {outputPath: logs}
