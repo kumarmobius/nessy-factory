@@ -1,4 +1,4 @@
-name: Benchmarks
+name: EvalBenchmarks
 description: |
   Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
   Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
@@ -108,20 +108,20 @@ implementation:
             print("[EVAL] Saved HF token for gated dataset access")
 
         # HF envs for caching / telemetry
-        os.environ.update({
+        os.environ.update({{
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "HF_HOME": CACHE,
             "HF_DATASETS_CACHE": CACHE,
             "HUGGINGFACE_HUB_CACHE": CACHE
-        })
+        }})
 
         TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]  # as requested, MuSR removed
 
         # Datasets that need to be preloaded (repo, split)
-        PRELOAD_MAP = {
+        PRELOAD_MAP = {{
             "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
-        }
+        }}
 
         def _preload_for_task(task):
             task_key = task.lower()
@@ -131,15 +131,15 @@ implementation:
             ok_any = False
             for repo, split in entries:
                 try:
-                    print("[EVAL] Preloading {} split={} ...".format(repo, split))
+                    print("[EVAL] Preloading {{}} split={{}} ...".format(repo, split))
                     try:
                         load_dataset(repo, split, cache_dir=CACHE, token=TOKEN)
                     except TypeError:
                         load_dataset(repo, split, cache_dir=CACHE, use_auth_token=TOKEN)
-                    print("[EVAL] Preloaded {}::{}".format(repo, split))
+                    print("[EVAL] Preloaded {{}}::{{}}".format(repo, split))
                     ok_any = True
                 except Exception as e:
-                    print("[EVAL] Preload failed for {}::{}: {}".format(repo, split, e))
+                    print("[EVAL] Preload failed for {{}}::{{}}: {{}}".format(repo, split, e))
             return ok_any
 
         # Start CO2 tracker, write emissions.csv inside converted model folder (if writable)
@@ -148,15 +148,15 @@ implementation:
         tracker.start()
 
         # Sanity load tokenizer + model
-        print("[EVAL] Loading tokenizer + model from: {}".format(CONVERTED))
+        print("[EVAL] Loading tokenizer + model from: {{}}".format(CONVERTED))
         tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
         _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
 
         # Decide device
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
-            print("[EVAL] CUDA visible devices: {}".format(os.environ.get("CUDA_VISIBLE_DEVICES", "all")))
-            print("[EVAL] torch reports {} CUDA device(s).".format(gpu_count))
+            print("[EVAL] CUDA visible devices: {{}}".format(os.environ.get("CUDA_VISIBLE_DEVICES", "all")))
+            print("[EVAL] torch reports {{}} CUDA device(s).".format(gpu_count))
             for i in range(gpu_count):
                 try:
                     name = torch.cuda.get_device_name(i)
@@ -166,17 +166,17 @@ implementation:
                     cap = torch.cuda.get_device_capability(i)
                 except Exception:
                     cap = ("?", "?")
-                print("  GPU {}: {}  |  capability: {}".format(i, name, cap))
+                print("  GPU {{}}: {{}}  |  capability: {{}}".format(i, name, cap))
             eval_device = "cuda:0"
         else:
             print("[EVAL] CUDA not available — using CPU")
             eval_device = "cpu"
-        print("[EVAL] Using device string for lm_eval: {}".format(eval_device))
+        print("[EVAL] Using device string for lm_eval: {{}}".format(eval_device))
 
         # helpers
         def safe_json(obj):
             if isinstance(obj, dict):
-                return {k: safe_json(v) for k, v in obj.items()}
+                return {{k: safe_json(v) for k, v in obj.items()}}
             if isinstance(obj, (list, tuple)):
                 return [safe_json(v) for v in obj]
             try:
@@ -203,19 +203,19 @@ implementation:
                     return k, float(v)
             return None, None
 
-        compact_results = {}
-        full_results = {}
+        compact_results = {{}}
+        full_results = {{}}
 
         # Run tasks one-by-one; continue on failure
         for task in TASKS:
-            print("\n[EVAL] Running task: {}".format(task))
+            print("\n[EVAL] Running task: {{}}".format(task))
             _preload_for_task(task)
 
             start_t = time.time()
             try:
                 res = evaluator.simple_evaluate(
                     model="hf",
-                    model_args="pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED),
+                    model_args="pretrained={{}},tokenizer={{}},trust_remote_code=False".format(CONVERTED, CONVERTED),
                     tasks=[task],
                     batch_size="auto:1",
                     device= "cuda:0" if torch.cuda.is_available() else "cpu",
@@ -225,27 +225,27 @@ implementation:
                 dur = time.time() - start_t
                 full_results[task] = safe_json(res)
 
-                results_dict = res.get("results", {})
+                results_dict = res.get("results", {{}})
                 task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
 
                 if isinstance(task_result, dict):
                     metric_name, metric_value = pick_metric(task_result)
                     if metric_name is not None:
-                        compact_results[task] = {metric_name: metric_value, "time_s": round(dur, 3)}
-                        print("[EVAL] {}: {} = {}  (time {:.1f}s)".format(task, metric_name, metric_value, dur))
+                        compact_results[task] = {{metric_name: metric_value, "time_s": round(dur, 3)}}
+                        print("[EVAL] {{}}: {{}} = {{}}  (time {{:.1f}}s)".format(task, metric_name, metric_value, dur))
                     else:
-                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(dur, 3)}
-                        print("[EVAL] {}: no numeric metric found  (time {:.1f}s)".format(task, dur))
+                        compact_results[task] = {{"note": "no numeric metric found", "time_s": round(dur, 3)}}
+                        print("[EVAL] {{}}: no numeric metric found  (time {{:.1f}}s)".format(task, dur))
                 else:
-                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(dur,3)}
-                    print("[EVAL] {}: unexpected result structure  (time {:.1f}s)".format(task, dur))
+                    compact_results[task] = {{"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(dur,3)}}
+                    print("[EVAL] {{}}: unexpected result structure  (time {{:.1f}}s)".format(task, dur))
 
             except Exception as e:
                 dur = time.time() - start_t
                 tb = traceback.format_exc()
-                print("[EVAL] Task {} failed with exception:\n{}".format(task, tb))
-                compact_results[task] = {"error": str(e), "time_s": round(dur, 3)}
-                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(dur, 3)}
+                print("[EVAL] Task {{}} failed with exception:\n{{}}".format(task, tb))
+                compact_results[task] = {{"error": str(e), "time_s": round(dur, 3)}}
+                full_results[task] = {{"error": str(e), "traceback": tb, "time_s": round(dur, 3)}}
 
         # stop emissions tracker
         emissions = tracker.stop()
@@ -266,7 +266,7 @@ implementation:
         if found_vals:
             composite_score = float(np.mean(found_vals))
             compact_results["composite_mean"] = round(composite_score, 6)
-            print("\n[EVAL] Composite mean over {}: {:.6f}".format(COMPOSITE_GROUP, composite_score))
+            print("\n[EVAL] Composite mean over {{}}: {{:.6f}}".format(COMPOSITE_GROUP, composite_score))
         else:
             print("\n[EVAL] No numeric values found for composite computation.")
 
@@ -276,9 +276,9 @@ implementation:
         with open(OUT_FULL, "w") as f:
             json.dump(safe_json(full_results), f, indent=2)
 
-        print("[EVAL] Saved compact summary to: {}".format(OUT_COMPACT))
-        print("[EVAL] Saved full results to: {}".format(OUT_FULL))
-        print("[EVAL] Emissions CSV at: {}".format(OUT_EMISSIONS))
+        print("[EVAL] Saved compact summary to: {{}}".format(OUT_COMPACT))
+        print("[EVAL] Saved full results to: {{}}".format(OUT_FULL))
+        print("[EVAL] Emissions CSV at: {{}}".format(OUT_EMISSIONS))
 
     args:
       - --converted_model
