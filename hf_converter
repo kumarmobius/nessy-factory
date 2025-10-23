@@ -124,12 +124,6 @@ implementation:
             sd = sd["state_dict"]
         out = OrderedDict(sd)
 
-        # Key fixes & safety additions
-        if "gpt_neox.final_layernorm.weight" in out and "gpt_neox.final_layer_norm.weight" not in out:
-            out["gpt_neox.final_layer_norm.weight"] = out.pop("gpt_neox.final_layernorm.weight")
-            if "gpt_neox.final_layernorm.bias" in out:
-                out["gpt_neox.final_layer_norm.bias"] = out.pop("gpt_neox.final_layernorm.bias")
-
         if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
             out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
