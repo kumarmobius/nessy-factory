@@ -40,15 +40,13 @@ implementation:
   container:
     image: nikhilv215/nesy-factory:v22
     command:
-      - sh
-      - c
-      - (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location
-        'lm_eval' || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet
-        --no-warn-script-location 'codecarbon' --user) && "$0" "$@"
-      - python3
-      - -u
-      - -c
+      - bash
+      - -lc
       - |
+        (PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location lm-eval codecarbon \
+         || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location lm-eval codecarbon --user)
+
+        cat > /tmp/hf_eval.py <<'PY'
         import argparse
         import os
         import json
@@ -265,6 +263,8 @@ implementation:
         log(f"Saved full results to: {OUT_FULL}")
   
         log("hf_eval script completed")
+        PY
+        exec python3 -u /tmp/hf_eval.py "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
