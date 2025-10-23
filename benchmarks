@@ -48,11 +48,9 @@ implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v23gpu
     command:
-      - python3
-      - -u
+      - sh
       - -c
       - |
-
         set -euo pipefail
         echo "[BOOT] Installing required Python packages (lm_eval, codecarbon)..."
         PIP="python3 -m pip"
@@ -61,8 +59,11 @@ implementation:
           || PIP_DISABLE_PIP_VERSION_CHECK=1 $PIP install --user --quiet --no-warn-script-location lm_eval codecarbon
         export PATH="$HOME/.local/bin:$PATH"
         echo "[BOOT] Python deps installed. Running evaluator..."
-        python3 -u - <<'PY'
-
+        python3 -u - "$@"
+      - python3
+      - -u
+      - -c
+      - |
         import argparse
         import os
         import json
