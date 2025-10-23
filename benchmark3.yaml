@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: Benchmarks
 description: |
   Run multiple lm-eval benchmarks (gpqa, mmlu_pro, bbh, math, ifeval) on a converted
   Hugging Face model folder. Accepts converted_model (HF folder) and hf_token (string).
@@ -199,7 +199,7 @@ implementation:
         full_results = {}
         
         # for task in TASKS:
-        #     print("\n[EVAL] Running task: {}".format(task))
+        #     print("\n[EVAL] moddak: {}".format(task))
         #     _preload_for_task(task)
         
         #     start_t = time.time()
