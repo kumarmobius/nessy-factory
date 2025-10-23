@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: EvalBenchmarks
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -43,10 +43,19 @@ implementation:
       - bash
       - -lc
       - |
+        # --- install matching PyTorch + torchvision first (CPU wheel shown) ---
         PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          lm-eval codecarbon "torch>=2.6.0" safetensors \
-          || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          lm-eval codecarbon "torch>=2.6.0" safetensors --user
+          "torch==2.2.0+cpu" "torchvision==0.17.0+cpu" \
+          --index-url https://download.pytorch.org/whl/cpu --force-reinstall \
+        || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          "torch==2.2.0+cpu" "torchvision==0.17.0+cpu" --index-url https://download.pytorch.org/whl/cpu --user
+
+        # --- then install safetensors and evaluation deps (fallback to --user preserved) ---
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          safetensors lm-eval codecarbon \
+        || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
+          safetensors lm-eval codecarbon --user
+
 
         cat > /tmp/hf_eval.py <<'PY'
         import argparse
