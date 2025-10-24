@@ -1,4 +1,4 @@
-name: Benchmarks_Eval
+name: Benchmarks_Evals
 description: >
   Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder,
   and write both compact summary and full results to component outputs.
@@ -105,8 +105,8 @@ implementation:
                 except Exception:
                     pass
                 # also write minimal outputs so pipeline sees artifacts (error info)
-                err_compact = {"__fatal__": str(exc)}
-                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
+                err_compact = {{"__fatal__": str(exc)}}
+                err_full = {{"__fatal__": str(exc), "traceback": traceback.format_exc()}}
                 try:
                     with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
                 except Exception: pass
@@ -143,8 +143,8 @@ implementation:
                 eprint("FATAL: evaluator.simple_evaluate failed:", exc)
                 eprint(traceback.format_exc())
                 # write error artifacts
-                err_compact = {"__fatal__": str(exc)}
-                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
+                err_compact = {{"__fatal__": str(exc)}}
+                err_full = {{"__fatal__": str(exc), "traceback": traceback.format_exc()}}
                 try:
                     with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
                 except Exception: pass
@@ -174,9 +174,9 @@ implementation:
                             if isinstance(vv, (int, float)):
                                 acc = vv
                                 break
-                    summary[k] = {"acc": acc}
+                    summary[k] = {{"acc": acc}}
                 else:
-                    summary[k] = {"acc": None}
+                    summary[k] = {{"acc": None}}
 
             try:
                 with open(OUT_COMPACT, "w") as f:
