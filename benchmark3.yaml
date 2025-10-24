@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: Benchmark
 description: |
   Convert a GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -15,7 +15,7 @@ inputs:
     default: /tmp/hf_cache
   - name: max_new_tokens
     type: Integer
-    default: "64"
+    default: 64
   - name: out_compact
     type: Data
     default: /tmp/outputs/benchmark_compact.json
@@ -43,8 +43,7 @@ implementation:
       - bash
       - -lc
       - |
-
-        cat > /tmp/hf_eval.py <<'PY'
+        cat > /tmp/hf_eval.py <<'PYEOF'
         import argparse
         import os
         import json
@@ -63,7 +62,6 @@ implementation:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
 
-        # --- begin main guarded block: any exception will be printed and exit(1) ---
         try:
             log("Starting hf_eval script")
 
@@ -229,7 +227,6 @@ implementation:
                 except Exception as e:
                     duration = time.time() - start_t
                     tb = traceback.format_exc()
-                    # print task-level error to screen immediately
                     print("TASK ERROR:", str(e), flush=True)
                     print(tb, flush=True)
                     compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
@@ -267,19 +264,17 @@ implementation:
             log("hf_eval script completed")
 
         except Exception as e:
-            # Top-level error: print it immediately to the container logs and exit non-zero
             print("FATAL ERROR:", str(e), flush=True)
             print(traceback.format_exc(), flush=True)
-            # try to stop emissions tracker if running
             try:
                 if 'tracker' in locals() and tracker is not None:
                     tracker.stop()
             except Exception:
                 pass
             sys.exit(1)
-        # --- end guarded block ---
-        PY
-        exec python3 -u /tmp/hf_eval.py "$0" "$@"
+        PYEOF
+        
+        python3 -u /tmp/hf_eval.py "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
