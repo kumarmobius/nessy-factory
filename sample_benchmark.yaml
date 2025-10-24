@@ -1,4 +1,4 @@
-name: Benchmarks_Evals
+name: Benchmarks_eval
 description: >
   Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder,
   and write both compact summary and full results to component outputs.
@@ -20,12 +20,10 @@ implementation:
   container:
     image: kumar2004/latest:v2
     command:
-      - python3
-      - -u
-      - -c
+      - bash
+      - -lc
       - |
-        # write the python runner
-        # cat > /tmp/eval_bbh_detected.py <<'PY'
+        cat > /tmp/eval_bbh_detected.py <<'ENDOFPYTHON'
         #!/usr/bin/env python3
         import sys, os, json, time, traceback
         import numpy as np
@@ -77,7 +75,6 @@ implementation:
             OUT_FULL = os.path.abspath(args.out_full)
 
             os.makedirs(CACHE, exist_ok=True)
-            # ensure output directories exist
             for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL)]:
                 if p:
                     os.makedirs(p, exist_ok=True)
@@ -104,18 +101,20 @@ implementation:
                         ef.write(traceback.format_exc())
                 except Exception:
                     pass
-                # also write minimal outputs so pipeline sees artifacts (error info)
-                err_compact = {{"__fatal__": str(exc)}}
-                err_full = {{"__fatal__": str(exc), "traceback": traceback.format_exc()}}
+                err_compact = {"__fatal__": str(exc)}
+                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
                 try:
-                    with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
-                except Exception: pass
+                    with open(OUT_COMPACT, "w") as f:
+                        json.dump(err_compact, f, indent=2)
+                except Exception:
+                    pass
                 try:
-                    with open(OUT_FULL, "w") as f: json.dump(err_full, f, indent=2)
-                except Exception: pass
+                    with open(OUT_FULL, "w") as f:
+                        json.dump(err_full, f, indent=2)
+                except Exception:
+                    pass
                 sys.exit(1)
 
-            # detect BBH tasks optionally
             if TaskManager is not None:
                 try:
                     tm = TaskManager()
@@ -124,6 +123,8 @@ implementation:
                 except Exception as exc:
                     eprint("BBH detection failed:", exc)
 
+            if not TASKS:
+                TASKS = ["ifeval"]
             eprint("Evaluating tasks:", TASKS)
 
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -142,18 +143,20 @@ implementation:
             except Exception as exc:
                 eprint("FATAL: evaluator.simple_evaluate failed:", exc)
                 eprint(traceback.format_exc())
-                # write error artifacts
-                err_compact = {{"__fatal__": str(exc)}}
-                err_full = {{"__fatal__": str(exc), "traceback": traceback.format_exc()}}
+                err_compact = {"__fatal__": str(exc)}
+                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
                 try:
-                    with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
-                except Exception: pass
+                    with open(OUT_COMPACT, "w") as f:
+                        json.dump(err_compact, f, indent=2)
+                except Exception:
+                    pass
                 try:
-                    with open(OUT_FULL, "w") as f: json.dump(err_full, f, indent=2)
-                except Exception: pass
+                    with open(OUT_FULL, "w") as f:
+                        json.dump(err_full, f, indent=2)
+                except Exception:
+                    pass
                 sys.exit(1)
 
-            # Save full results to the component output path
             try:
                 with open(OUT_FULL, "w") as f:
                     json.dump(safe_json(results), f, indent=2)
@@ -162,21 +165,18 @@ implementation:
                 eprint("Failed writing full results:", exc)
                 eprint(traceback.format_exc())
 
-            # build compact summary: task -> {"acc": value_or_null}
             summary = {}
             for k, v in results.get("results", {}).items():
                 if isinstance(v, dict):
-                    # prefer standard acc keys if present
                     acc = v.get("acc", v.get("acc,none", None))
-                    # if still None, try other numeric fields (pick any numeric)
                     if acc is None:
                         for kk, vv in v.items():
                             if isinstance(vv, (int, float)):
                                 acc = vv
                                 break
-                    summary[k] = {{"acc": acc}}
+                    summary[k] = {"acc": acc}
                 else:
-                    summary[k] = {{"acc": None}}
+                    summary[k] = {"acc": None}
 
             try:
                 with open(OUT_COMPACT, "w") as f:
@@ -193,17 +193,17 @@ implementation:
                 eprint("UNHANDLED EXCEPTION:", e)
                 eprint(traceback.format_exc())
                 sys.exit(1)
-        # PY
-        # execute the script, forwarding arguments properly ($0 first)
-        # exec python3 -u /tmp/eval_bbh_detected.py "$0" "$@"
+        ENDOFPYTHON
+
+        python3 -u /tmp/eval_bbh_detected.py \
+          --converted_model "$0" \
+          --cache_dir "$1" \
+          --tasks "$2" \
+          --out_compact "$3" \
+          --out_full "$4"
     args:
-      - --converted_model
-      - {inputPath: converted_model}
-      - --cache_dir
-      - {inputValue: cache_dir}
-      - --tasks
-      - {inputValue: tasks}
-      - --out_compact
-      - {outputPath: compact_metrics}
-      - --out_full
-      - {outputPath: full_results}
+      - inputPath: converted_model
+      - inputValue: cache_dir
+      - inputValue: tasks
+      - outputPath: compact_metrics
+      - outputPath: full_results
