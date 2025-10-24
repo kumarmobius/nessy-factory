@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: EvalBenchmark
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -110,7 +110,8 @@ implementation:
         eprint("Evaluating tasks:", TASKS)
         
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False"
+        # model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False"
+        model_args = "pretrained={},tokenizer={},trust_remote_code=False,device_map=auto,torch_dtype=float16,low_cpu_mem_usage=True".format(CKPT, CKPT)
         
         try:
             results = evaluator.simple_evaluate(
