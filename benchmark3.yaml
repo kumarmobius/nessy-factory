@@ -1,6 +1,6 @@
-name: Benchmark
+name: EvalBenchmarks
 description: |
-  Convert a GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
+  Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
   - name: converted_model
     type: Model
@@ -15,7 +15,7 @@ inputs:
     default: /tmp/hf_cache
   - name: max_new_tokens
     type: Integer
-    default: 64
+    default: "64"
   - name: out_compact
     type: Data
     default: /tmp/outputs/benchmark_compact.json
@@ -43,7 +43,8 @@ implementation:
       - bash
       - -lc
       - |
-        cat > /tmp/hf_eval.py <<'PYEOF'
+
+        cat > /tmp/hf_eval.py <<'PY'
         import argparse
         import os
         import json
@@ -56,225 +57,214 @@ implementation:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from lm_eval import evaluator
         from codecarbon import EmissionsTracker
-        import sys
 
+        print('torch', torch.__version__)
+  
         def log(msg):
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[EVAL {ts}] {msg}", flush=True)
-
-        try:
-            log("Starting hf_eval script")
-
-            parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
-            parser.add_argument("--converted_model", required=True)
-            parser.add_argument("--hf_token", default="")
-            parser.add_argument("--cache_dir", default="/tmp/hf_cache")
-            parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
-            parser.add_argument("--max_new_tokens", type=int, default=64)
-            parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
-            parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
-            parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
-            args = parser.parse_args()
-
-            log(f"Parsed args: converted_model={args.converted_model}, cache_dir={args.cache_dir}, tasks={args.tasks}, max_new_tokens={args.max_new_tokens}")
-            CONVERTED = os.path.abspath(args.converted_model)
-            CACHE = os.path.abspath(args.cache_dir)
-            OUT_COMPACT = os.path.abspath(args.out_compact)
-            OUT_FULL = os.path.abspath(args.out_full)
-            OUT_EMISSIONS = os.path.abspath(args.out_emissions)
-
-            for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
-                if p:
-                    os.makedirs(p, exist_ok=True)
-                    log(f"Ensured directory exists: {p}")
-
-            TOKEN = args.hf_token or ""
-            if TOKEN:
-                os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
-                os.environ["HF_TOKEN"] = TOKEN
-                HfFolder.save_token(TOKEN)
-                log("Saved Hugging Face token for gated dataset access")
-
-            os.environ.update({
-                "HF_HUB_DISABLE_TELEMETRY": "1",
-                "HF_HOME": CACHE,
-                "HF_DATASETS_CACHE": CACHE,
-                "HUGGINGFACE_HUB_CACHE": CACHE
-            })
-
-            TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
-            COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
-
-            PRELOAD_MAP = {
-                "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
-            }
-
-            def _preload_for_task(task):
-                task_key = task.lower()
-                entries = PRELOAD_MAP.get(task_key)
-                if not entries:
-                    return False
-                ok_any = False
-                for repo, split in entries:
-                    try:
-                        log(f"Preloading dataset {repo} split={split} (cache_dir={CACHE})")
-                        try:
-                            load_dataset(repo, split, cache_dir=CACHE, token=TOKEN)
-                        except TypeError:
-                            load_dataset(repo, split, cache_dir=CACHE, use_auth_token=TOKEN)
-                        log(f"Preloaded {repo}::{split}")
-                        ok_any = True
-                    except Exception as e:
-                        log(f"Preload failed for {repo}::{split}: {e}")
-                return ok_any
-
-            log(f"Starting emissions tracker -> {OUT_EMISSIONS}")
-            tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
-            tracker.start()
-
-            log(f"Loading tokenizer + model from: {CONVERTED}")
-            tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
-            _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
-            log("Tokenizer and model loaded")
-
-            if torch.cuda.is_available():
-                gpu_count = torch.cuda.device_count()
-                log(f"CUDA visible devices: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
-                log(f"torch reports {gpu_count} CUDA device(s).")
-                for i in range(gpu_count):
-                    try:
-                        name = torch.cuda.get_device_name(i)
-                    except Exception:
-                        name = "<unknown>"
-                    try:
-                        cap = torch.cuda.get_device_capability(i)
-                    except Exception:
-                        cap = ("?", "?")
-                    log(f"  GPU {i}: {name}  |  capability: {cap}")
-                eval_device = "cuda:0"
-            else:
-                log("CUDA not available — using CPU")
-                eval_device = "cpu"
-            log(f"Using device string for lm_eval: {eval_device}")
-
-            def safe_json(obj):
-                if isinstance(obj, dict):
-                    return {k: safe_json(v) for k, v in obj.items()}
-                if isinstance(obj, (list, tuple)):
-                    return [safe_json(v) for v in obj]
+  
+        log("Starting hf_eval script")
+  
+        parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
+        parser.add_argument("--converted_model", required=True)
+        parser.add_argument("--hf_token", default="")
+        parser.add_argument("--cache_dir", default="/tmp/hf_cache")
+        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
+        parser.add_argument("--max_new_tokens", type=int, default=64)
+        parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
+        parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
+        parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
+        args = parser.parse_args()
+  
+        log(f"Parsed args: converted_model={args.converted_model}, cache_dir={args.cache_dir}, tasks={args.tasks}, max_new_tokens={args.max_new_tokens}")
+        CONVERTED = os.path.abspath(args.converted_model)
+        CACHE = os.path.abspath(args.cache_dir)
+        OUT_COMPACT = os.path.abspath(args.out_compact)
+        OUT_FULL = os.path.abspath(args.out_full)
+        OUT_EMISSIONS = os.path.abspath(args.out_emissions)
+  
+        for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
+            if p:
+                os.makedirs(p, exist_ok=True)
+                log(f"Ensured directory exists: {p}")
+  
+        TOKEN = args.hf_token or ""
+        if TOKEN:
+            os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
+            os.environ["HF_TOKEN"] = TOKEN
+            HfFolder.save_token(TOKEN)
+            log("Saved Hugging Face token for gated dataset access")
+  
+        os.environ.update({
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HOME": CACHE,
+            "HF_DATASETS_CACHE": CACHE,
+            "HUGGINGFACE_HUB_CACHE": CACHE
+        })
+  
+        TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
+        COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
+  
+        PRELOAD_MAP = {
+            "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
+        }
+  
+        def _preload_for_task(task):
+            task_key = task.lower()
+            entries = PRELOAD_MAP.get(task_key)
+            if not entries:
+                return False
+            ok_any = False
+            for repo, split in entries:
                 try:
-                    if hasattr(obj, "item"):
-                        return obj.item()
-                except Exception:
-                    pass
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)):
-                    return str(obj)
-                try:
-                    json.dumps(obj)
-                    return obj
-                except Exception:
-                    return str(obj)
-
-            def pick_metric(d):
-                for k in ("acc_norm", "acc", "accuracy"):
-                    if k in d and isinstance(d[k], (int, float)):
-                        return k, float(d[k])
-                for k, v in d.items():
-                    if isinstance(v, (int, float)):
-                        return k, float(v)
-                return None, None
-
-            compact_results = {}
-            full_results = {}
-
-            total_tasks = len(TASKS)
-            log(f"Will run {total_tasks} task(s): {TASKS}")
-
-            for idx, task in enumerate(TASKS, start=1):
-                log(f"=== Starting task {idx}/{total_tasks}: {task} ===")
-                _preload_for_task(task)
-                start_t = time.time()
-                try:
-                    model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
-                    res = evaluator.simple_evaluate(
-                        model="hf",
-                        model_args=model_args_str,
-                        tasks=[task],
-                        batch_size="auto:1",
-                        device=eval_device,
-                        num_fewshot=0,
-                        limit=None,
-                    )
-                    duration = time.time() - start_t
-                    full_results[task] = safe_json(res)
-                    results_dict = res.get("results", {})
-                    task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
-
-                    if isinstance(task_result, dict):
-                        metric_name, metric_value = pick_metric(task_result)
-                        if metric_name is not None:
-                            compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
-                            log(f"Task {task} succeeded: {metric_name} = {metric_value}  (time {duration:.1f}s)")
-                        else:
-                            compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
-                            log(f"Task {task}: no numeric metric found  (time {duration:.1f}s)")
-                    else:
-                        compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
-                        log(f"Task {task}: unexpected result structure  (time {duration:.1f}s)")
-
+                    log(f"Preloading dataset {repo} split={split} (cache_dir={CACHE})")
+                    try:
+                        load_dataset(repo, split, cache_dir=CACHE, token=TOKEN)
+                    except TypeError:
+                        load_dataset(repo, split, cache_dir=CACHE, use_auth_token=TOKEN)
+                    log(f"Preloaded {repo}::{split}")
+                    ok_any = True
                 except Exception as e:
-                    duration = time.time() - start_t
-                    tb = traceback.format_exc()
-                    print("TASK ERROR:", str(e), flush=True)
-                    print(tb, flush=True)
-                    compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
-                    full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
-
-            emissions = tracker.stop()
-            compact_results["co2_emissions_kg"] = float(emissions)
-            full_results["co2_emissions_kg"] = float(emissions)
-            log(f"Emissions recorded: {emissions} kg CO2")
-
-            found_vals = []
-            for t in COMPOSITE_GROUP:
-                entry = compact_results.get(t)
-                if isinstance(entry, dict):
-                    for k, v in entry.items():
-                        if k == "time_s" or k.startswith("note") or k == "error":
-                            continue
-                        if isinstance(v, (int, float)):
-                            found_vals.append(float(v))
-                            break
-
-            if found_vals:
-                composite_score = float(np.mean(found_vals))
-                compact_results["composite_mean"] = round(composite_score, 6)
-                log(f"Composite mean over {COMPOSITE_GROUP}: {composite_score}")
-
-            with open(OUT_COMPACT, "w") as f:
-                json.dump(safe_json(compact_results), f, indent=2)
-            log(f"Saved compact summary to: {OUT_COMPACT}")
-
-            with open(OUT_FULL, "w") as f:
-                json.dump(safe_json(full_results), f, indent=2)
-            log(f"Saved full results to: {OUT_FULL}")
-
-            log("hf_eval script completed")
-
-        except Exception as e:
-            print("FATAL ERROR:", str(e), flush=True)
-            print(traceback.format_exc(), flush=True)
+                    log(f"Preload failed for {repo}::{split}: {e}")
+            return ok_any
+  
+        log(f"Starting emissions tracker -> {OUT_EMISSIONS}")
+        tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
+        tracker.start()
+  
+        log(f"Loading tokenizer + model from: {CONVERTED}")
+        tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
+        _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
+        log("Tokenizer and model loaded")
+  
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            log(f"CUDA visible devices: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+            log(f"torch reports {gpu_count} CUDA device(s).")
+            for i in range(gpu_count):
+                try:
+                    name = torch.cuda.get_device_name(i)
+                except Exception:
+                    name = "<unknown>"
+                try:
+                    cap = torch.cuda.get_device_capability(i)
+                except Exception:
+                    cap = ("?", "?")
+                log(f"  GPU {i}: {name}  |  capability: {cap}")
+            eval_device = "cuda:0"
+        else:
+            log("CUDA not available — using CPU")
+            eval_device = "cpu"
+        log(f"Using device string for lm_eval: {eval_device}")
+  
+        def safe_json(obj):
+            if isinstance(obj, dict):
+                return {k: safe_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [safe_json(v) for v in obj]
             try:
-                if 'tracker' in locals() and tracker is not None:
-                    tracker.stop()
+                if hasattr(obj, "item"):
+                    return obj.item()
             except Exception:
                 pass
-            sys.exit(1)
-        PYEOF
-        
-        python3 -u /tmp/hf_eval.py "$@"
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)):
+                return str(obj)
+            try:
+                json.dumps(obj)
+                return obj
+            except Exception:
+                return str(obj)
+  
+        def pick_metric(d):
+            for k in ("acc_norm", "acc", "accuracy"):
+                if k in d and isinstance(d[k], (int, float)):
+                    return k, float(d[k])
+            for k, v in d.items():
+                if isinstance(v, (int, float)):
+                    return k, float(v)
+            return None, None
+  
+        compact_results = {}
+        full_results = {}
+  
+        total_tasks = len(TASKS)
+        log(f"Will run {total_tasks} task(s): {TASKS}")
+  
+        for idx, task in enumerate(TASKS, start=1):
+            log(f"=== Starting task {idx}/{total_tasks}: {task} ===")
+            _preload_for_task(task)
+            start_t = time.time()
+            try:
+                model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
+                res = evaluator.simple_evaluate(
+                    model="hf",
+                    model_args=model_args_str,
+                    tasks=[task],
+                    batch_size="auto:1",
+                    device=eval_device,
+                    num_fewshot=0,
+                    limit=None,
+                )
+                duration = time.time() - start_t
+                full_results[task] = safe_json(res)
+                results_dict = res.get("results", {})
+                task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
+  
+                if isinstance(task_result, dict):
+                    metric_name, metric_value = pick_metric(task_result)
+                    if metric_name is not None:
+                        compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
+                        log(f"Task {task} succeeded: {metric_name} = {metric_value}  (time {duration:.1f}s)")
+                    else:
+                        compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
+                        log(f"Task {task}: no numeric metric found  (time {duration:.1f}s)")
+                else:
+                    compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
+                    log(f"Task {task}: unexpected result structure  (time {duration:.1f}s)")
+  
+            except Exception as e:
+                duration = time.time() - start_t
+                tb = traceback.format_exc()
+                log(f"Task {task} failed with exception: {e}")
+                print(tb, flush=True)
+                compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
+                full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
+  
+        emissions = tracker.stop()
+        compact_results["co2_emissions_kg"] = float(emissions)
+        full_results["co2_emissions_kg"] = float(emissions)
+        log(f"Emissions recorded: {emissions} kg CO2")
+  
+        found_vals = []
+        for t in COMPOSITE_GROUP:
+            entry = compact_results.get(t)
+            if isinstance(entry, dict):
+                for k, v in entry.items():
+                    if k == "time_s" or k.startswith("note") or k == "error":
+                        continue
+                    if isinstance(v, (int, float)):
+                        found_vals.append(float(v))
+                        break
+  
+        if found_vals:
+            composite_score = float(np.mean(found_vals))
+            compact_results["composite_mean"] = round(composite_score, 6)
+            log(f"Composite mean over {COMPOSITE_GROUP}: {composite_score}")
+  
+        with open(OUT_COMPACT, "w") as f:
+            json.dump(safe_json(compact_results), f, indent=2)
+        log(f"Saved compact summary to: {OUT_COMPACT}")
+  
+        with open(OUT_FULL, "w") as f:
+            json.dump(safe_json(full_results), f, indent=2)
+        log(f"Saved full results to: {OUT_FULL}")
+  
+        log("hf_eval script completed")
+        PY
+        exec python3 -u /tmp/hf_eval.py "$0" "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
