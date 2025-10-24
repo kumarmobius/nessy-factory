@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: EvalBenchmarks
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -108,10 +108,28 @@ implementation:
         if not TASKS:
             TASKS = ["ifeval"]
         eprint("Evaluating tasks:", TASKS)
+
+        if torch.cuda.is_available():
+            eprint(f"Available GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        else:
+            eprint("No GPU available, using CPU")
+            import psutil
+            eprint(f"Available system RAM: {psutil.virtual_memory().total / 1e9:.2f} GB")
+            eprint(f"Available system RAM (free): {psutil.virtual_memory().available / 1e9:.2f} GB")
+
         
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         # model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False"
         model_args = "pretrained={},tokenizer={},trust_remote_code=False,device_map=auto,torch_dtype=float16,low_cpu_mem_usage=True".format(CKPT, CKPT)
+
+        if torch.cuda.is_available():
+            eprint(f"Available GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        else:
+            eprint("No GPU available, using CPU")
+            import psutil
+            eprint(f"Available system RAM: {psutil.virtual_memory().total / 1e9:.2f} GB")
+            eprint(f"Available system RAM (free): {psutil.virtual_memory().available / 1e9:.2f} GB")
+
         
         try:
             results = evaluator.simple_evaluate(
