@@ -20,11 +20,12 @@ implementation:
   container:
     image: kumar2004/latest:v2
     command:
-      - bash
-      - -lc
+      - python3
+      - -u
+      - -c
       - |
         # write the python runner
-        cat > /tmp/eval_bbh_detected.py <<'PY'
+        # cat > /tmp/eval_bbh_detected.py <<'PY'
         #!/usr/bin/env python3
         import sys, os, json, time, traceback
         import numpy as np
@@ -192,9 +193,9 @@ implementation:
                 eprint("UNHANDLED EXCEPTION:", e)
                 eprint(traceback.format_exc())
                 sys.exit(1)
-        PY
+        # PY
         # execute the script, forwarding arguments properly ($0 first)
-        exec python3 -u /tmp/eval_bbh_detected.py "$0" "$@"
+        # exec python3 -u /tmp/eval_bbh_detected.py "$0" "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
