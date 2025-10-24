@@ -1,6 +1,7 @@
-name: EvalBBHDetected
+name: EvalBBH_Detected_WithOutputs
 description: >
-  Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder.
+  Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder,
+  and write both compact summary and full results to component outputs.
 inputs:
   - name: converted_model
     type: Model
@@ -11,7 +12,9 @@ inputs:
     type: String
     default: ifeval
 outputs:
-  - name: results
+  - name: compact_metrics
+    type: Data
+  - name: full_results
     type: Data
 implementation:
   container:
@@ -20,6 +23,7 @@ implementation:
       - bash
       - -lc
       - |
+        # write the python runner
         cat > /tmp/eval_bbh_detected.py <<'PY'
         #!/usr/bin/env python3
         import sys, os, json, time, traceback
@@ -61,13 +65,21 @@ implementation:
             parser.add_argument("--converted_model", required=True)
             parser.add_argument("--cache_dir", default="/tmp/hf_cache")
             parser.add_argument("--tasks", default="ifeval")
+            parser.add_argument("--out_compact", required=True)
+            parser.add_argument("--out_full", required=True)
             args = parser.parse_args()
 
             CKPT = os.path.abspath(args.converted_model)
             CACHE = os.path.abspath(args.cache_dir)
             TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
+            OUT_COMPACT = os.path.abspath(args.out_compact)
+            OUT_FULL = os.path.abspath(args.out_full)
 
             os.makedirs(CACHE, exist_ok=True)
+            # ensure output directories exist
+            for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL)]:
+                if p:
+                    os.makedirs(p, exist_ok=True)
 
             os.environ.update({
                 "HF_HUB_DISABLE_TELEMETRY": "1",
@@ -85,16 +97,24 @@ implementation:
             except Exception as exc:
                 eprint("FATAL: failed to load model/tokenizer:", exc)
                 eprint(traceback.format_exc())
-                # try to write an error artifact next to the model path
                 try:
                     with open(os.path.join(CKPT, "result_dynamic_error.txt"), "w") as ef:
                         ef.write(str(exc) + "\n\n")
                         ef.write(traceback.format_exc())
                 except Exception:
                     pass
+                # also write minimal outputs so pipeline sees artifacts (error info)
+                err_compact = {"__fatal__": str(exc)}
+                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
+                try:
+                    with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
+                except Exception: pass
+                try:
+                    with open(OUT_FULL, "w") as f: json.dump(err_full, f, indent=2)
+                except Exception: pass
                 sys.exit(1)
 
-            # optional detection of BBH tasks
+            # detect BBH tasks optionally
             if TaskManager is not None:
                 try:
                     tm = TaskManager()
@@ -102,7 +122,6 @@ implementation:
                     eprint("Detected BBH tasks:", bbh_tasks)
                 except Exception as exc:
                     eprint("BBH detection failed:", exc)
-
 
             eprint("Evaluating tasks:", TASKS)
 
@@ -122,28 +141,49 @@ implementation:
             except Exception as exc:
                 eprint("FATAL: evaluator.simple_evaluate failed:", exc)
                 eprint(traceback.format_exc())
+                # write error artifacts
+                err_compact = {"__fatal__": str(exc)}
+                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
                 try:
-                    with open(os.path.join(CKPT, "result_dynamic_error.txt"), "w") as ef:
-                        ef.write(str(exc) + "\n\n")
-                        ef.write(traceback.format_exc())
-                except Exception:
-                    pass
+                    with open(OUT_COMPACT, "w") as f: json.dump(err_compact, f, indent=2)
+                except Exception: pass
+                try:
+                    with open(OUT_FULL, "w") as f: json.dump(err_full, f, indent=2)
+                except Exception: pass
                 sys.exit(1)
 
-            out_path = os.path.join(CKPT, "result_dynamic.json")
-            with open(out_path, "w") as f:
-                json.dump(safe_json(results), f, indent=2)
-            eprint("Saved results to:", out_path)
+            # Save full results to the component output path
+            try:
+                with open(OUT_FULL, "w") as f:
+                    json.dump(safe_json(results), f, indent=2)
+                eprint("Wrote full results to:", OUT_FULL)
+            except Exception as exc:
+                eprint("Failed writing full results:", exc)
+                eprint(traceback.format_exc())
 
-            # small summary artifact
+            # build compact summary: task -> {"acc": value_or_null}
             summary = {}
             for k, v in results.get("results", {}).items():
                 if isinstance(v, dict):
+                    # prefer standard acc keys if present
                     acc = v.get("acc", v.get("acc,none", None))
+                    # if still None, try other numeric fields (pick any numeric)
+                    if acc is None:
+                        for kk, vv in v.items():
+                            if isinstance(vv, (int, float)):
+                                acc = vv
+                                break
                     summary[k] = {"acc": acc}
-            with open(os.path.join(CKPT, "result_summary.json"), "w") as f:
-                json.dump(summary, f, indent=2)
-            eprint("Saved summary to:", os.path.join(CKPT, "result_summary.json"))
+                else:
+                    summary[k] = {"acc": None}
+
+            try:
+                with open(OUT_COMPACT, "w") as f:
+                    json.dump(safe_json(summary), f, indent=2)
+                eprint("Wrote compact summary to:", OUT_COMPACT)
+            except Exception as exc:
+                eprint("Failed writing compact summary:", exc)
+                eprint(traceback.format_exc())
 
         if __name__ == "__main__":
             try:
@@ -153,6 +193,7 @@ implementation:
                 eprint(traceback.format_exc())
                 sys.exit(1)
         PY
+        # execute the script, forwarding arguments properly ($0 first)
         exec python3 -u /tmp/eval_bbh_detected.py "$0" "$@"
     args:
       - --converted_model
@@ -161,3 +202,7 @@ implementation:
       - {inputValue: cache_dir}
       - --tasks
       - {inputValue: tasks}
+      - --out_compact
+      - {outputPath: compact_metrics}
+      - --out_full
+      - {outputPath: full_results}
