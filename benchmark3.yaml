@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: EvalBenchmark
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -158,7 +158,7 @@ implementation:
             # Start log file
             try:
                 lf = open(LOG_PATH, "a")
-                lf.write(f"\n\n=== Run start {now_ts()} ===\n")
+                lf.write(f"\n\nRun start {now_ts()}\n")
             except Exception:
                 lf = None
         
@@ -245,7 +245,7 @@ implementation:
                 logf(f"Will run {total_tasks} task(s): {TASKS}")
         
                 for idx, task in enumerate(TASKS, start=1):
-                    logf(f"=== Starting task {idx}/{total_tasks}: {task} ===")
+                    logf(f" Starting task {idx}/{total_tasks}: {task}")
                     _preload_for_task(task, CACHE, TOKEN)
                     start_t = time.time()
                     try:
@@ -342,7 +342,7 @@ implementation:
                 # flush and close log file
                 try:
                     if lf:
-                        lf.write(f"=== Run end {now_ts()} ===\n")
+                        lf.write(f"Run end {now_ts()}\n")
                         lf.flush()
                         lf.close()
                         log(f"Wrote log file to {LOG_PATH}")
