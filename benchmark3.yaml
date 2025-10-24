@@ -38,24 +38,11 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v22
+    image: kumar2004/latest:v2
     command:
       - bash
       - -lc
       - |
-        # --- install matching PyTorch + torchvision first (CPU wheel shown) ---
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          "torch==2.2.0+cpu" "torchvision==0.17.0+cpu" \
-          --index-url https://download.pytorch.org/whl/cpu --force-reinstall \
-        || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          "torch==2.2.0+cpu" "torchvision==0.17.0+cpu" --index-url https://download.pytorch.org/whl/cpu --user
-
-        # --- then install safetensors and evaluation deps (fallback to --user preserved) ---
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          safetensors lm-eval codecarbon \
-        || PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location \
-          safetensors lm-eval codecarbon --user
-
 
         cat > /tmp/hf_eval.py <<'PY'
         import argparse
