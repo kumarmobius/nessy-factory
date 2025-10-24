@@ -1,4 +1,4 @@
-name: EvalBBH_Detected_WithOutputs
+name: Benchmarks_Eval
 description: >
   Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder,
   and write both compact summary and full results to component outputs.
