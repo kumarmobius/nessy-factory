@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: EvalBenchmarks
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -79,7 +79,7 @@ implementation:
         try:
             eprint("Loading model from:", CKPT)
             tok = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=False)
-            model = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False)
+            # model = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False)
             eprint("Model loaded successfully")
         except Exception as exc:
             eprint("FATAL load error:", exc)
