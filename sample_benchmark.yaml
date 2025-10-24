@@ -16,7 +16,7 @@ outputs:
     type: Data
 implementation:
   container:
-    image: kumar2004/latest:v2
+    image: kumar2004/latest:v3
     command:
       - python3
       - -u
