@@ -1,4 +1,4 @@
-name: EvalBenchmarks
+name: EvalBenchmark
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -16,7 +16,7 @@ outputs:
     type: Data
 implementation:
   container:
-    image: kumar2004/latest:v3
+    image: kumar2004/latest:v4
     command:
       - python3
       - -u
