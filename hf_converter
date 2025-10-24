@@ -33,262 +33,239 @@ outputs:
 
 implementation:
   container:
-    image: kumar2004/latest:v2
+    image: nikhilv215/nesy-factory:v22
     command:
-      - bash
-      - -lc
+      - python3
+      - -u
+      - -c
       - |
-
-        cat > /tmp/hf_eval.py <<'PY'
         import argparse
         import os
-        import json
-        import time
-        import traceback
-        import numpy as np
-        import torch
-        from huggingface_hub import HfFolder
-        from datasets import load_dataset
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        from lm_eval import evaluator
-        from codecarbon import EmissionsTracker
         import sys
+        import json
+        import shutil
+        import re
+        from collections import OrderedDict
 
-        def log(msg):
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[EVAL {ts}] {msg}", flush=True)
+        import torch
 
-        # --- begin main guarded block: any exception will be printed and exit(1) ---
-        try:
-            log("Starting hf_eval script")
+        def safe_mkdir(path):
+            if path and not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
 
-            parser = argparse.ArgumentParser(description="Evaluate HF model on multiple lm_eval tasks")
-            parser.add_argument("--converted_model", required=True)
-            parser.add_argument("--hf_token", default="")
-            parser.add_argument("--cache_dir", default="/tmp/hf_cache")
-            parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
-            parser.add_argument("--max_new_tokens", type=int, default=64)
-            parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
-            parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
-            parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
-            args = parser.parse_args()
+        def is_json_file(path):
+            if not path or not os.path.exists(path):
+                return False
+            with open(path, "r", encoding="utf-8") as f:
+                json.load(f)
+            return True
 
-            log(f"Parsed args: converted_model={args.converted_model}, cache_dir={args.cache_dir}, tasks={args.tasks}, max_new_tokens={args.max_new_tokens}")
-            CONVERTED = os.path.abspath(args.converted_model)
-            CACHE = os.path.abspath(args.cache_dir)
-            OUT_COMPACT = os.path.abspath(args.out_compact)
-            OUT_FULL = os.path.abspath(args.out_full)
-            OUT_EMISSIONS = os.path.abspath(args.out_emissions)
+        def print_file_preview(path, n=256):
+            if not path:
+                print(f"[DEBUG] preview: path empty")
+                return
+            if not os.path.exists(path):
+                print(f"[DEBUG] preview: {path} does not exist")
+                return
+            print(f"[DEBUG] preview: {path} (first {n} bytes):")
+            with open(path, "rb") as f:
+                data = f.read(n)
+            print(repr(data[:min(len(data),64)]))
 
-            for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
-                if p:
-                    os.makedirs(p, exist_ok=True)
-                    log(f"Ensured directory exists: {p}")
+        parser = argparse.ArgumentParser(description="HFConvertor (named flags only)")
+        parser.add_argument("--tokenizer_json", default="", help="tokenizer.json (optional)")
+        parser.add_argument("--model_pt", required=True, help="PyTorch checkpoint .pt/.bin")
+        parser.add_argument("--model_config_json", default="", help="base config JSON (optional)")
+        parser.add_argument("--cache_dir", default="/tmp/hf_cache", help="cache directory")
+        parser.add_argument("--output_model_dir", default="/tmp/hf_model", help="output HF model dir")
+        parser.add_argument("--max_new_tokens", type=int, default=80, help="max new tokens (unused)")
+        parser.add_argument("--out_converted", default="/tmp/outputs/converted_model/data", help="artifact output dir")
+        args = parser.parse_args()
 
-            TOKEN = args.hf_token or ""
-            if TOKEN:
-                os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
-                os.environ["HF_TOKEN"] = TOKEN
-                HfFolder.save_token(TOKEN)
-                log("Saved Hugging Face token for gated dataset access")
+        TOKENIZER_PATH = args.tokenizer_json or ""
+        PT_PATH = args.model_pt
+        CFG_PATH = args.model_config_json or ""
+        CACHE_DIR = args.cache_dir
+        OUT_MODEL_DIR = args.output_model_dir
+        MAX_NEW_TOKENS = args.max_new_tokens
+        OUT_CONVERTED = args.out_converted
 
-            os.environ.update({
-                "HF_HUB_DISABLE_TELEMETRY": "1",
-                "HF_HOME": CACHE,
-                "HF_DATASETS_CACHE": CACHE,
-                "HUGGINGFACE_HUB_CACHE": CACHE
-            })
+        print("[CONVERT] Inputs:")
+        print("  tokenizer_json:", TOKENIZER_PATH)
+        print("  model_pt      :", PT_PATH)
+        print("  model_config  :", CFG_PATH)
+        print("  cache_dir     :", CACHE_DIR)
+        print("  out_model_dir :", OUT_MODEL_DIR)
+        print("  max_new_tokens:", MAX_NEW_TOKENS)
+        print("  out_converted :", OUT_CONVERTED)
 
-            TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
-            COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
+        # Validate required inputs
+        if not os.path.exists(PT_PATH):
+            print(f"[FATAL] model_pt not found: {PT_PATH}", file=sys.stderr)
+            sys.exit(2)
 
-            PRELOAD_MAP = {
-                "gpqa": [("Idavidrein/gpqa", "gpqa_main")],
-            }
+        # Create directories
+        safe_mkdir(CACHE_DIR)
+        safe_mkdir(OUT_MODEL_DIR)
+        safe_mkdir(os.path.dirname(OUT_CONVERTED))
+        safe_mkdir(OUT_CONVERTED)
 
-            def _preload_for_task(task):
-                task_key = task.lower()
-                entries = PRELOAD_MAP.get(task_key)
-                if not entries:
-                    return False
-                ok_any = False
-                for repo, split in entries:
-                    try:
-                        log(f"Preloading dataset {repo} split={split} (cache_dir={CACHE})")
-                        try:
-                            load_dataset(repo, split, cache_dir=CACHE, token=TOKEN)
-                        except TypeError:
-                            load_dataset(repo, split, cache_dir=CACHE, use_auth_token=TOKEN)
-                        log(f"Preloaded {repo}::{split}")
-                        ok_any = True
-                    except Exception as e:
-                        log(f"Preload failed for {repo}::{split}: {e}")
-                return ok_any
+        # Debug previews
+        print_file_preview(PT_PATH)
+        if TOKENIZER_PATH:
+            print_file_preview(TOKENIZER_PATH)
+        if CFG_PATH:
+            print_file_preview(CFG_PATH)
 
-            log(f"Starting emissions tracker -> {OUT_EMISSIONS}")
-            tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
-            tracker.start()
+        # Load checkpoint
+        print("[CONVERT] Loading checkpoint:", PT_PATH)
+        sd = torch.load(PT_PATH, map_location="cpu")
+        if isinstance(sd, dict) and "state_dict" in sd:
+            sd = sd["state_dict"]
+        out = OrderedDict(sd)
 
-            log(f"Loading tokenizer + model from: {CONVERTED}")
-            tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
-            _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
-            log("Tokenizer and model loaded")
+        if "gpt_neox.embed_out.weight" not in out and "gpt_neox.embed_in.weight" in out:
+            out["gpt_neox.embed_out.weight"] = out["gpt_neox.embed_in.weight"]
 
-            if torch.cuda.is_available():
-                gpu_count = torch.cuda.device_count()
-                log(f"CUDA visible devices: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
-                log(f"torch reports {gpu_count} CUDA device(s).")
-                for i in range(gpu_count):
-                    try:
-                        name = torch.cuda.get_device_name(i)
-                    except Exception:
-                        name = "<unknown>"
-                    try:
-                        cap = torch.cuda.get_device_capability(i)
-                    except Exception:
-                        cap = ("?", "?")
-                    log(f"  GPU {i}: {name}  |  capability: {cap}")
-                eval_device = "cuda:0"
-            else:
-                log("CUDA not available — using CPU")
-                eval_device = "cpu"
-            log(f"Using device string for lm_eval: {eval_device}")
+        # Fill missing biases for attention and dense if necessary
+        layer_ids = sorted({int(m.group(1)) for k in out.keys()
+                            for m in [re.search(r"gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight$", k)]
+                            if m})
+        for i in layer_ids:
+            wq = out.get(f"gpt_neox.layers.{i}.attention.query_key_value.weight")
+            wo = out.get(f"gpt_neox.layers.{i}.attention.dense.weight")
+            if wq is not None and f"gpt_neox.layers.{i}.attention.query_key_value.bias" not in out:
+                out[f"gpt_neox.layers.{i}.attention.query_key_value.bias"] = torch.zeros(wq.size(0), dtype=wq.dtype)
+            if wo is not None and f"gpt_neox.layers.{i}.attention.dense.bias" not in out:
+                out[f"gpt_neox.layers.{i}.attention.dense.bias"] = torch.zeros(wo.size(0), dtype=wo.dtype)
 
-            def safe_json(obj):
-                if isinstance(obj, dict):
-                    return {k: safe_json(v) for k, v in obj.items()}
-                if isinstance(obj, (list, tuple)):
-                    return [safe_json(v) for v in obj]
-                try:
-                    if hasattr(obj, "item"):
-                        return obj.item()
-                except Exception:
-                    pass
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)):
-                    return str(obj)
-                try:
-                    json.dumps(obj)
-                    return obj
-                except Exception:
-                    return str(obj)
+        # Save pytorch_model.bin
+        torch.save(out, os.path.join(OUT_MODEL_DIR, "pytorch_model.bin"))
+        print("[CONVERT] Wrote pytorch_model.bin to", OUT_MODEL_DIR)
 
-            def pick_metric(d):
-                for k in ("acc_norm", "acc", "accuracy"):
-                    if k in d and isinstance(d[k], (int, float)):
-                        return k, float(d[k])
-                for k, v in d.items():
-                    if isinstance(v, (int, float)):
-                        return k, float(v)
-                return None, None
+        # Infer geometry from checkpoint
+        if "gpt_neox.embed_in.weight" not in out:
+            print("[FATAL] checkpoint missing gpt_neox.embed_in.weight", file=sys.stderr)
+            sys.exit(3)
+        vocab_size, hidden_size = out["gpt_neox.embed_in.weight"].shape
 
-            compact_results = {}
-            full_results = {}
+        layer_nums = [int(re.search(r"gpt_neox\.layers\.(\d+)\.", k).group(1))
+                      for k in out if k.startswith("gpt_neox.layers.")]
+        num_layers = 1 + max(layer_nums) if layer_nums else int(os.environ.get("NUM_LAYERS", 1))
 
-            total_tasks = len(TASKS)
-            log(f"Will run {total_tasks} task(s): {TASKS}")
+        if "gpt_neox.layers.0.mlp.dense_h_to_4h.weight" in out:
+            intermediate_size = out["gpt_neox.layers.0.mlp.dense_h_to_4h.weight"].shape[0]
+        else:
+            intermediate_size = max(4 * (hidden_size // 1), hidden_size * 4)
 
-            for idx, task in enumerate(TASKS, start=1):
-                log(f"=== Starting task {idx}/{total_tasks}: {task} ===")
-                _preload_for_task(task)
-                start_t = time.time()
-                try:
-                    model_args_str = "pretrained={},tokenizer={},trust_remote_code=False".format(CONVERTED, CONVERTED)
-                    res = evaluator.simple_evaluate(
-                        model="hf",
-                        model_args=model_args_str,
-                        tasks=[task],
-                        batch_size="auto:1",
-                        device=eval_device,
-                        num_fewshot=0,
-                        limit=None,
-                    )
-                    duration = time.time() - start_t
-                    full_results[task] = safe_json(res)
-                    results_dict = res.get("results", {})
-                    task_result = results_dict.get(task) or (next(iter(results_dict.values())) if results_dict else None)
+        def infer_heads(hid):
+            for h in [32, 16, 8, 24, 12, 4, 2]:
+                if hid % h == 0:
+                    return h
+            return max(1, hid // 64) or 8
 
-                    if isinstance(task_result, dict):
-                        metric_name, metric_value = pick_metric(task_result)
-                        if metric_name is not None:
-                            compact_results[task] = {metric_name: metric_value, "time_s": round(duration, 3)}
-                            log(f"Task {task} succeeded: {metric_name} = {metric_value}  (time {duration:.1f}s)")
-                        else:
-                            compact_results[task] = {"note": "no numeric metric found", "time_s": round(duration, 3)}
-                            log(f"Task {task}: no numeric metric found  (time {duration:.1f}s)")
-                    else:
-                        compact_results[task] = {"note": "unexpected result structure", "raw": safe_json(task_result), "time_s": round(duration,3)}
-                        log(f"Task {task}: unexpected result structure  (time {duration:.1f}s)")
+        def detect_tie(sd_map):
+            if "gpt_neox.embed_out.weight" in sd_map and "gpt_neox.embed_in.weight" in sd_map:
+                return sd_map["gpt_neox.embed_out.weight"].data_ptr() == sd_map["gpt_neox.embed_in.weight"].data_ptr()
+            return False
 
-                except Exception as e:
-                    duration = time.time() - start_t
-                    tb = traceback.format_exc()
-                    # print task-level error to screen immediately
-                    print("TASK ERROR:", str(e), flush=True)
-                    print(tb, flush=True)
-                    compact_results[task] = {"error": str(e), "time_s": round(duration, 3)}
-                    full_results[task] = {"error": str(e), "traceback": tb, "time_s": round(duration, 3)}
+        # Read base cfg JSON if present (no try/except)
+        cfg_json = {}
+        if CFG_PATH and os.path.exists(CFG_PATH):
+            with open(CFG_PATH, "r", encoding="utf-8") as f:
+                cfg_json = json.load(f)
+            print("[CONVERT] Loaded base config from", CFG_PATH)
 
-            emissions = tracker.stop()
-            compact_results["co2_emissions_kg"] = float(emissions)
-            full_results["co2_emissions_kg"] = float(emissions)
-            log(f"Emissions recorded: {emissions} kg CO2")
+        num_heads = int(cfg_json.get("num_attention_heads") or cfg_json.get("num_heads") or infer_heads(hidden_size))
+        max_pos = int(cfg_json.get("max_position_embeddings") or cfg_json.get("max_seq_len") or 512)
+        rotary_pct = float(cfg_json.get("rotary_pct", 0.25))
+        rotary_base = float(cfg_json.get("rotary_emb_base", 10000.0))
+        use_parallel_residual = bool(cfg_json.get("use_parallel_residual", False))
+        layer_norm_eps = float(cfg_json.get("layer_norm_eps", 1e-5))
+        hidden_act = str(cfg_json.get("hidden_act", "gelu"))
+        tie_word_embeddings = bool(cfg_json.get("tie_word_embeddings", detect_tie(out)))
 
-            found_vals = []
-            for t in COMPOSITE_GROUP:
-                entry = compact_results.get(t)
-                if isinstance(entry, dict):
-                    for k, v in entry.items():
-                        if k == "time_s" or k.startswith("note") or k == "error":
-                            continue
-                        if isinstance(v, (int, float)):
-                            found_vals.append(float(v))
-                            break
+        hf_cfg = {
+            "architectures": ["GPTNeoXForCausalLM"],
+            "model_type": "gpt_neox",
+            "vocab_size": int(vocab_size),
+            "hidden_size": int(hidden_size),
+            "intermediate_size": int(intermediate_size),
+            "num_attention_heads": int(num_heads),
+            "num_hidden_layers": int(num_layers),
+            "max_position_embeddings": int(max_pos),
+            "rotary_pct": rotary_pct,
+            "rotary_emb_base": rotary_base,
+            "use_parallel_residual": use_parallel_residual,
+            "layer_norm_eps": layer_norm_eps,
+            "hidden_act": hidden_act,
+            "tie_word_embeddings": tie_word_embeddings,
+        }
 
-            if found_vals:
-                composite_score = float(np.mean(found_vals))
-                compact_results["composite_mean"] = round(composite_score, 6)
-                log(f"Composite mean over {COMPOSITE_GROUP}: {composite_score}")
+        with open(os.path.join(OUT_MODEL_DIR, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(hf_cfg, f, indent=2)
+        print("[CONVERT] Wrote config.json")
 
-            with open(OUT_COMPACT, "w") as f:
-                json.dump(safe_json(compact_results), f, indent=2)
-            log(f"Saved compact summary to: {OUT_COMPACT}")
+        # If tied embeddings, drop embed_out to save space and re-save
+        if tie_word_embeddings and "gpt_neox.embed_out.weight" in out:
+            out.pop("gpt_neox.embed_out.weight", None)
+            torch.save(out, os.path.join(OUT_MODEL_DIR, "pytorch_model.bin"))
+            print("[CONVERT] Re-saved pytorch_model.bin without embed_out (tied)")
 
-            with open(OUT_FULL, "w") as f:
-                json.dump(safe_json(full_results), f, indent=2)
-            log(f"Saved full results to: {OUT_FULL}")
+        # Tokenizer handling (copy tokenizer.json if provided)
+        ids = {"pad_token_id": None, "unk_token_id": None, "bos_token_id": None, "eos_token_id": None}
+        if TOKENIZER_PATH and os.path.exists(TOKENIZER_PATH):
+            shutil.copy2(TOKENIZER_PATH, os.path.join(OUT_MODEL_DIR, "tokenizer.json"))
+            with open(TOKENIZER_PATH, "r", encoding="utf-8") as f:
+                t = json.load(f)
+            name_map = {"[PAD]":"pad_token_id","[UNK]":"unk_token_id","[BOS]":"bos_token_id","[EOS]":"eos_token_id"}
+            for a in t.get("added_tokens", []):
+                if a.get("special") and "id" in a and a.get("content") in name_map:
+                    ids[name_map[a["content"]]] = a["id"]
+            print("[CONVERT] Copied tokenizer.json")
 
-            log("hf_eval script completed")
+        tok_cfg = {
+            "model_max_length": max_pos,
+            "pad_token_id": ids.get("pad_token_id", 0),
+            "unk_token_id": ids.get("unk_token_id", 1),
+            "bos_token_id": ids.get("bos_token_id", 2),
+            "eos_token_id": ids.get("eos_token_id", 3),
+        }
+        with open(os.path.join(OUT_MODEL_DIR, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+            json.dump(tok_cfg, f, indent=2)
 
-        except Exception as e:
-            # Top-level error: print it immediately to the container logs and exit non-zero
-            print("FATAL ERROR:", str(e), flush=True)
-            print(traceback.format_exc(), flush=True)
-            # try to stop emissions tracker if running
-            try:
-                if 'tracker' in locals() and tracker is not None:
-                    tracker.stop()
-            except Exception:
-                pass
-            sys.exit(1)
-        # --- end guarded block ---
-        PY
-        exec python3 -u /tmp/hf_eval.py "$0" "$@"
+        spec_map = {"pad_token":"[PAD]","unk_token":"[UNK]","bos_token":"[BOS]","eos_token":"[EOS]"}
+        with open(os.path.join(OUT_MODEL_DIR, "special_tokens_map.json"), "w", encoding="utf-8") as f:
+            json.dump(spec_map, f, indent=2)
+
+        gen_cfg = {"max_length": max_pos, "do_sample": False, "eos_token_id": tok_cfg["eos_token_id"]}
+        with open(os.path.join(OUT_MODEL_DIR, "generation_config.json"), "w", encoding="utf-8") as f:
+            json.dump(gen_cfg, f, indent=2)
+
+        # Copy the HF model folder into the converted artifact path
+        print("[CONVERT] Copying HF folder to artifact dir:", OUT_CONVERTED)
+        safe_mkdir(OUT_CONVERTED)
+        for root, dirs, files in os.walk(OUT_MODEL_DIR):
+            rel = os.path.relpath(root, OUT_MODEL_DIR)
+            target_dir = os.path.join(OUT_CONVERTED, rel) if rel != "." else OUT_CONVERTED
+            safe_mkdir(target_dir)
+            for fname in files:
+                shutil.copy2(os.path.join(root, fname), os.path.join(target_dir, fname))
+
+        print("[CONVERT] Conversion completed successfully.")
+        print("[CONVERT] Artifact available at:", OUT_CONVERTED)
     args:
-      - --converted_model
-      - {inputPath: converted_model}
-      - --hf_token
-      - {inputValue: hf_token}
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --model_pt
+      - {inputPath: model_pt}
+      - --model_config_json
+      - {inputPath: model_config_json}
       - --cache_dir
       - {inputValue: cache_dir}
-      - --tasks
-      - {inputValue: tasks}
+      - --output_model_dir
+      - {inputValue: output_model_dir}
       - --max_new_tokens
       - {inputValue: max_new_tokens}
-      - --out_compact
-      - {outputPath: compact_metrics}
-      - --out_full
-      - {outputPath: full_results}
-      - --out_emissions
-      - {outputPath: emissions_csv}
+      - --out_converted
+      - {outputPath: converted_model}
