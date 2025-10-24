@@ -1,7 +1,5 @@
-name: Benchmarks_eval
-description: >
-  Run a small lm-eval snippet (BBH detection + tasks) against a local HF-style model folder,
-  and write both compact summary and full results to component outputs.
+name: BenchmarksEval
+description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
     type: Model
@@ -20,187 +18,127 @@ implementation:
   container:
     image: kumar2004/latest:v2
     command:
-      - bash
-      - -lc
-      - |
-        cat > /tmp/eval_bbh_detected.py <<'ENDOFPYTHON'
-        #!/usr/bin/env python3
-        import sys, os, json, time, traceback
-        import numpy as np
-        import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        from lm_eval import evaluator
-        try:
-            from lm_eval.tasks import TaskManager
-        except Exception:
-            TaskManager = None
-
-        def eprint(*a, **k):
-            print(*a, file=sys.stderr, **k); sys.stderr.flush()
-
+      - python3
+      - -u
+      - -c
+      - >
+        import sys, os, json, traceback;
+        import numpy as np;
+        import torch;
+        from transformers import AutoTokenizer, AutoModelForCausalLM;
+        from lm_eval import evaluator;
+        try: from lm_eval.tasks import TaskManager
+        except: TaskManager = None
+        
+        
+        def eprint(*a, **k): print(*a, file=sys.stderr, **k); sys.stderr.flush()
+        
+        
         def safe_json(obj):
-            if isinstance(obj, dict):
-                return {k: safe_json(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)):
-                return [safe_json(v) for v in obj]
+            if isinstance(obj, dict): return {k: safe_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)): return [safe_json(v) for v in obj]
             try:
-                if hasattr(obj, "item"):
-                    return obj.item()
-            except Exception:
-                pass
+                if hasattr(obj, "item"): return obj.item()
+            except: pass
             try:
-                import torch as _t
-                if isinstance(obj, (np.ndarray, _t.Tensor)):
-                    return obj.tolist()
-            except Exception:
-                pass
-            if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)):
-                return str(obj)
+                import torch as _t;
+                if isinstance(obj, (np.ndarray, _t.Tensor)): return obj.tolist()
+            except: pass
+            if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)): return str(obj)
             return obj
-
-        def main():
-            import argparse
-            parser = argparse.ArgumentParser()
-            parser.add_argument("--converted_model", required=True)
-            parser.add_argument("--cache_dir", default="/tmp/hf_cache")
-            parser.add_argument("--tasks", default="ifeval")
-            parser.add_argument("--out_compact", required=True)
-            parser.add_argument("--out_full", required=True)
-            args = parser.parse_args()
-
-            CKPT = os.path.abspath(args.converted_model)
-            CACHE = os.path.abspath(args.cache_dir)
-            TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
-            OUT_COMPACT = os.path.abspath(args.out_compact)
-            OUT_FULL = os.path.abspath(args.out_full)
-
-            os.makedirs(CACHE, exist_ok=True)
-            for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL)]:
-                if p:
-                    os.makedirs(p, exist_ok=True)
-
-            os.environ.update({
-                "HF_HUB_DISABLE_TELEMETRY": "1",
-                "HF_HUB_ENABLE_HF_TRANSFER": "0",
-                "HF_HOME": CACHE,
-                "HF_DATASETS_CACHE": CACHE,
-                "HUGGINGFACE_HUB_CACHE": CACHE
-            })
-
+        
+        
+        CKPT = os.path.abspath(sys.argv[1]);
+        CACHE = os.path.abspath(sys.argv[2]);
+        TASKS = [t.strip() for t in sys.argv[3].split(",") if t.strip()];
+        OUT_COMPACT = os.path.abspath(sys.argv[4]);
+        OUT_FULL = os.path.abspath(sys.argv[5]);
+        
+        
+        os.makedirs(CACHE, exist_ok=True);
+        for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL)]:
+            if p: os.makedirs(p, exist_ok=True)
+        
+        
+        os.environ.update({"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0", "HF_HOME": CACHE, "HF_DATASETS_CACHE": CACHE, "HUGGINGFACE_HUB_CACHE": CACHE});
+        
+        
+        try:
+            eprint("Loading model from:", CKPT);
+            tok = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=False);
+            _ = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False);
+            eprint("Model loaded successfully")
+        except Exception as exc:
+            eprint("FATAL load error:", exc);
+            eprint(traceback.format_exc());
+            err_data = {"error": str(exc), "traceback": traceback.format_exc()};
             try:
-                eprint("Loading tokenizer + model from:", CKPT)
-                tok = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=False)
-                _ = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False)
-                eprint("Loaded model and tokenizer successfully")
+                with open(OUT_COMPACT, "w") as f: json.dump(err_data, f)
+            except: pass
+            try:
+                with open(OUT_FULL, "w") as f: json.dump(err_data, f)
+            except: pass
+            sys.exit(1)
+        
+        
+        if TaskManager is not None:
+            try:
+                tm = TaskManager();
+                bbh_tasks = [k for k in tm.task_index if k.startswith("bbh_zeroshot_")];
+                eprint("BBH tasks detected:", bbh_tasks)
             except Exception as exc:
-                eprint("FATAL: failed to load model/tokenizer:", exc)
-                eprint(traceback.format_exc())
-                try:
-                    with open(os.path.join(CKPT, "result_dynamic_error.txt"), "w") as ef:
-                        ef.write(str(exc) + "\n\n")
-                        ef.write(traceback.format_exc())
-                except Exception:
-                    pass
-                err_compact = {"__fatal__": str(exc)}
-                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
-                try:
-                    with open(OUT_COMPACT, "w") as f:
-                        json.dump(err_compact, f, indent=2)
-                except Exception:
-                    pass
-                try:
-                    with open(OUT_FULL, "w") as f:
-                        json.dump(err_full, f, indent=2)
-                except Exception:
-                    pass
-                sys.exit(1)
-
-            if TaskManager is not None:
-                try:
-                    tm = TaskManager()
-                    bbh_tasks = [k for k in tm.task_index if k.startswith("bbh_zeroshot_")]
-                    eprint("Detected BBH tasks:", bbh_tasks)
-                except Exception as exc:
-                    eprint("BBH detection failed:", exc)
-
-            if not TASKS:
-                TASKS = ["ifeval"]
-            eprint("Evaluating tasks:", TASKS)
-
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            model_args_str = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False"
-
+                eprint("BBH detection failed:", exc)
+        
+        
+        if not TASKS: TASKS = ["ifeval"]
+        eprint("Evaluating tasks:", TASKS);
+        
+        
+        device = "cuda:0" if torch.cuda.is_available() else "cpu";
+        model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False";
+        
+        
+        try:
+            results = evaluator.simple_evaluate(model="hf", model_args=model_args, tasks=TASKS, batch_size="auto:1", device=device, num_fewshot=0, limit=None)
+        except Exception as exc:
+            eprint("FATAL eval error:", exc);
+            eprint(traceback.format_exc());
+            err_data = {"error": str(exc), "traceback": traceback.format_exc()};
             try:
-                results = evaluator.simple_evaluate(
-                    model="hf",
-                    model_args=model_args_str,
-                    tasks=TASKS,
-                    batch_size="auto:1",
-                    device=device,
-                    num_fewshot=0,
-                    limit=None
-                )
-            except Exception as exc:
-                eprint("FATAL: evaluator.simple_evaluate failed:", exc)
-                eprint(traceback.format_exc())
-                err_compact = {"__fatal__": str(exc)}
-                err_full = {"__fatal__": str(exc), "traceback": traceback.format_exc()}
-                try:
-                    with open(OUT_COMPACT, "w") as f:
-                        json.dump(err_compact, f, indent=2)
-                except Exception:
-                    pass
-                try:
-                    with open(OUT_FULL, "w") as f:
-                        json.dump(err_full, f, indent=2)
-                except Exception:
-                    pass
-                sys.exit(1)
-
+                with open(OUT_COMPACT, "w") as f: json.dump(err_data, f)
+            except: pass
             try:
-                with open(OUT_FULL, "w") as f:
-                    json.dump(safe_json(results), f, indent=2)
-                eprint("Wrote full results to:", OUT_FULL)
-            except Exception as exc:
-                eprint("Failed writing full results:", exc)
-                eprint(traceback.format_exc())
-
-            summary = {}
-            for k, v in results.get("results", {}).items():
-                if isinstance(v, dict):
-                    acc = v.get("acc", v.get("acc,none", None))
-                    if acc is None:
-                        for kk, vv in v.items():
-                            if isinstance(vv, (int, float)):
-                                acc = vv
-                                break
-                    summary[k] = {"acc": acc}
-                else:
-                    summary[k] = {"acc": None}
-
-            try:
-                with open(OUT_COMPACT, "w") as f:
-                    json.dump(safe_json(summary), f, indent=2)
-                eprint("Wrote compact summary to:", OUT_COMPACT)
-            except Exception as exc:
-                eprint("Failed writing compact summary:", exc)
-                eprint(traceback.format_exc())
-
-        if __name__ == "__main__":
-            try:
-                main()
-            except Exception as e:
-                eprint("UNHANDLED EXCEPTION:", e)
-                eprint(traceback.format_exc())
-                sys.exit(1)
-        ENDOFPYTHON
-
-        python3 -u /tmp/eval_bbh_detected.py \
-          --converted_model "$0" \
-          --cache_dir "$1" \
-          --tasks "$2" \
-          --out_compact "$3" \
-          --out_full "$4"
+                with open(OUT_FULL, "w") as f: json.dump(err_data, f)
+            except: pass
+            sys.exit(1)
+        
+        
+        try:
+            with open(OUT_FULL, "w") as f: json.dump(safe_json(results), f, indent=2);
+            eprint("Wrote full results to:", OUT_FULL)
+        except Exception as exc:
+            eprint("Failed writing full results:", exc)
+        
+        
+        summary = {};
+        for k, v in results.get("results", {}).items():
+            if isinstance(v, dict):
+                acc = v.get("acc", v.get("acc,none", None));
+                if acc is None:
+                    for kk, vv in v.items():
+                        if isinstance(vv, (int, float)):
+                            acc = vv;
+                            break
+                summary[k] = {"acc": acc}
+            else:
+                summary[k] = {"acc": None}
+        
+        
+        try:
+            with open(OUT_COMPACT, "w") as f: json.dump(safe_json(summary), f, indent=2);
+            eprint("Wrote compact summary to:", OUT_COMPACT)
+        except Exception as exc:
+            eprint("Failed writing compact summary:", exc)
     args:
       - inputPath: converted_model
       - inputValue: cache_dir
