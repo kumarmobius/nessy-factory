@@ -1,4 +1,4 @@
-name: BenchmarksEval
+name: EvalBenchmarks
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -21,121 +21,146 @@ implementation:
       - python3
       - -u
       - -c
-      - >
-        import sys, os, json, traceback;
-        import numpy as np;
-        import torch;
-        from transformers import AutoTokenizer, AutoModelForCausalLM;
-        from lm_eval import evaluator;
-        try: from lm_eval.tasks import TaskManager
-        except: TaskManager = None
+      - |
+        import sys, os, json, traceback
+        import numpy as np
+        import torch
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+        from lm_eval import evaluator
+        TaskManager = None
+        try:
+            from lm_eval.tasks import TaskManager
+        except:
+            pass
         
-        
-        def eprint(*a, **k): print(*a, file=sys.stderr, **k); sys.stderr.flush()
-        
+        def eprint(*a, **k):
+            print(*a, file=sys.stderr, **k)
+            sys.stderr.flush()
         
         def safe_json(obj):
-            if isinstance(obj, dict): return {k: safe_json(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)): return [safe_json(v) for v in obj]
+            if isinstance(obj, dict):
+                return {k: safe_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [safe_json(v) for v in obj]
             try:
-                if hasattr(obj, "item"): return obj.item()
-            except: pass
+                if hasattr(obj, "item"):
+                    return obj.item()
+            except:
+                pass
             try:
-                import torch as _t;
-                if isinstance(obj, (np.ndarray, _t.Tensor)): return obj.tolist()
-            except: pass
-            if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)): return str(obj)
+                import torch as _t
+                if isinstance(obj, (np.ndarray, _t.Tensor)):
+                    return obj.tolist()
+            except:
+                pass
+            if isinstance(obj, (np.dtype, torch.dtype, torch.device, type)):
+                return str(obj)
             return obj
         
+        CKPT = os.path.abspath(sys.argv[1])
+        CACHE = os.path.abspath(sys.argv[2])
+        TASKS = [t.strip() for t in sys.argv[3].split(",") if t.strip()]
+        OUT_COMPACT = os.path.abspath(sys.argv[4])
+        OUT_FULL = os.path.abspath(sys.argv[5])
         
-        CKPT = os.path.abspath(sys.argv[1]);
-        CACHE = os.path.abspath(sys.argv[2]);
-        TASKS = [t.strip() for t in sys.argv[3].split(",") if t.strip()];
-        OUT_COMPACT = os.path.abspath(sys.argv[4]);
-        OUT_FULL = os.path.abspath(sys.argv[5]);
-        
-        
-        os.makedirs(CACHE, exist_ok=True);
+        os.makedirs(CACHE, exist_ok=True)
         for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL)]:
-            if p: os.makedirs(p, exist_ok=True)
+            if p:
+                os.makedirs(p, exist_ok=True)
         
-        
-        os.environ.update({"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0", "HF_HOME": CACHE, "HF_DATASETS_CACHE": CACHE, "HUGGINGFACE_HUB_CACHE": CACHE});
-        
+        os.environ.update({
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HUB_ENABLE_HF_TRANSFER": "0",
+            "HF_HOME": CACHE,
+            "HF_DATASETS_CACHE": CACHE,
+            "HUGGINGFACE_HUB_CACHE": CACHE
+        })
         
         try:
-            eprint("Loading model from:", CKPT);
-            tok = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=False);
-            _ = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False);
+            eprint("Loading model from:", CKPT)
+            tok = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=False)
+            model = AutoModelForCausalLM.from_pretrained(CKPT, trust_remote_code=False)
             eprint("Model loaded successfully")
         except Exception as exc:
-            eprint("FATAL load error:", exc);
-            eprint(traceback.format_exc());
-            err_data = {"error": str(exc), "traceback": traceback.format_exc()};
+            eprint("FATAL load error:", exc)
+            eprint(traceback.format_exc())
+            err_data = {"error": str(exc), "traceback": traceback.format_exc()}
             try:
-                with open(OUT_COMPACT, "w") as f: json.dump(err_data, f)
-            except: pass
+                with open(OUT_COMPACT, "w") as f:
+                    json.dump(err_data, f)
+            except:
+                pass
             try:
-                with open(OUT_FULL, "w") as f: json.dump(err_data, f)
-            except: pass
+                with open(OUT_FULL, "w") as f:
+                    json.dump(err_data, f)
+            except:
+                pass
             sys.exit(1)
-        
         
         if TaskManager is not None:
             try:
-                tm = TaskManager();
-                bbh_tasks = [k for k in tm.task_index if k.startswith("bbh_zeroshot_")];
+                tm = TaskManager()
+                bbh_tasks = [k for k in tm.task_index if k.startswith("bbh_zeroshot_")]
                 eprint("BBH tasks detected:", bbh_tasks)
             except Exception as exc:
                 eprint("BBH detection failed:", exc)
         
+        if not TASKS:
+            TASKS = ["ifeval"]
+        eprint("Evaluating tasks:", TASKS)
         
-        if not TASKS: TASKS = ["ifeval"]
-        eprint("Evaluating tasks:", TASKS);
-        
-        
-        device = "cuda:0" if torch.cuda.is_available() else "cpu";
-        model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False";
-        
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        model_args = "pretrained=" + CKPT + ",tokenizer=" + CKPT + ",trust_remote_code=False"
         
         try:
-            results = evaluator.simple_evaluate(model="hf", model_args=model_args, tasks=TASKS, batch_size="auto:1", device=device, num_fewshot=0, limit=None)
+            results = evaluator.simple_evaluate(
+                model="hf",
+                model_args=model_args,
+                tasks=TASKS,
+                batch_size="auto:1",
+                device=device,
+                num_fewshot=0,
+                limit=None
+            )
         except Exception as exc:
-            eprint("FATAL eval error:", exc);
-            eprint(traceback.format_exc());
-            err_data = {"error": str(exc), "traceback": traceback.format_exc()};
+            eprint("FATAL eval error:", exc)
+            eprint(traceback.format_exc())
+            err_data = {"error": str(exc), "traceback": traceback.format_exc()}
             try:
-                with open(OUT_COMPACT, "w") as f: json.dump(err_data, f)
-            except: pass
+                with open(OUT_COMPACT, "w") as f:
+                    json.dump(err_data, f)
+            except:
+                pass
             try:
-                with open(OUT_FULL, "w") as f: json.dump(err_data, f)
-            except: pass
+                with open(OUT_FULL, "w") as f:
+                    json.dump(err_data, f)
+            except:
+                pass
             sys.exit(1)
         
-        
         try:
-            with open(OUT_FULL, "w") as f: json.dump(safe_json(results), f, indent=2);
+            with open(OUT_FULL, "w") as f:
+                json.dump(safe_json(results), f, indent=2)
             eprint("Wrote full results to:", OUT_FULL)
         except Exception as exc:
             eprint("Failed writing full results:", exc)
         
-        
-        summary = {};
+        summary = {}
         for k, v in results.get("results", {}).items():
             if isinstance(v, dict):
-                acc = v.get("acc", v.get("acc,none", None));
+                acc = v.get("acc", v.get("acc,none", None))
                 if acc is None:
                     for kk, vv in v.items():
                         if isinstance(vv, (int, float)):
-                            acc = vv;
+                            acc = vv
                             break
                 summary[k] = {"acc": acc}
             else:
                 summary[k] = {"acc": None}
         
-        
         try:
-            with open(OUT_COMPACT, "w") as f: json.dump(safe_json(summary), f, indent=2);
+            with open(OUT_COMPACT, "w") as f:
+                json.dump(safe_json(summary), f, indent=2)
             eprint("Wrote compact summary to:", OUT_COMPACT)
         except Exception as exc:
             eprint("Failed writing compact summary:", exc)
