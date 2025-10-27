@@ -203,10 +203,10 @@ implementation:
                     model="hf",
                     model_args=model_args_str,
                     tasks=[task],
-                    batch_size="auto:1",
+                    batch_size="5",
                     device=eval_device,
                     num_fewshot=0,
-                    limit=None,
+                    limit=100,
                 )
                 duration = time.time() - start_t
                 full_results[task] = safe_json(res)
