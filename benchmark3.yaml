@@ -1,4 +1,4 @@
-name: BenchmarksEval
+name: BenchmarksEvals
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -372,10 +372,10 @@ implementation:
                 "schema": schema
             }
         except Exception:
-            metric_payload = {"compact": compact_results, "full": full_results, "co2_kg": emissions_val, "schema": schema}
+            metric_payload = {k: round(v, 2) if isinstance(v, (int, float)) else v for k, v in results.items()}
 
-        # single-line JSON with stable prefix so CI / logs can extract it
-        metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False), ensure_ascii=False)
+
+        metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False)
         print(metric_line, flush=True)
         import sys
         print(metric_line, file=sys.stderr, flush=True)
