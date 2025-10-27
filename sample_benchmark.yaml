@@ -1,4 +1,4 @@
-name: EvalBenchmark
+name: EvalBenchmarks
 description: Run a small lm-eval snippet against a local HF-style model folder
 inputs:
   - name: converted_model
@@ -17,6 +17,15 @@ outputs:
 implementation:
   container:
     image: kumar2004/latest:v4
+    resources:
+      requests:
+        cpu: "2"
+        memory: "8Gi"
+        ephemeral-storage: "5Gi"
+      limits:
+        cpu: "4"
+        memory: "16Gi"
+        ephemeral-storage: "10Gi"
     command:
       - python3
       - -u
