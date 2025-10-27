@@ -35,6 +35,8 @@ outputs:
     type: Data
   - name: logs
     type: Data
+  - name: schema_json
+    type: Data
 
 implementation:
   container:
@@ -58,6 +60,7 @@ implementation:
         from datasets import load_dataset
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from lm_eval import evaluator
+        from lm_eval.tasks import TaskManager
         from codecarbon import EmissionsTracker
 
         def log(msg):
@@ -75,6 +78,7 @@ implementation:
         parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
         parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
         parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
+        parser.add_argument("--out_schema", default="/tmp/outputs/schema.json")
         args = parser.parse_args()
 
         log(f"Parsed args: converted_model={args.converted_model}, cache_dir={args.cache_dir}, tasks={args.tasks}, max_new_tokens={args.max_new_tokens}")
@@ -83,8 +87,9 @@ implementation:
         OUT_COMPACT = os.path.abspath(args.out_compact)
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
+        OUT_SCHEMA = os.path.abspath(args.out_schema)
 
-        for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), CACHE]:
+        for p in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), os.path.dirname(OUT_SCHEMA), CACHE]:
             if p:
                 os.makedirs(p, exist_ok=True)
                 log(f"Ensured directory exists: {p}")
@@ -103,7 +108,25 @@ implementation:
             "HUGGINGFACE_HUB_CACHE": CACHE
         })
 
-        TASKS = [t.strip() for t in args.tasks.split(",") if t.strip()]
+        # Determine TASKS. If the user requested a generic "math" run, auto-detect available math tasks
+        # using lm_eval's TaskManager and prefer hendrycks_math tasks; otherwise use the provided list.
+        tm = None
+        try:
+            tm = TaskManager()
+            avail = set(tm.task_index)
+            math_tasks = sorted([t for t in avail if "math" in t.lower() or "hendrycks_math" in t.lower()])
+            log(f"Available math tasks: {math_tasks}")
+        except Exception as _e:
+            log(f"Failed to build TaskManager for math autodetection: {_e}")
+            math_tasks = []
+
+        req_tasks = args.tasks.strip()
+        if req_tasks.lower() in ("math", "math_auto"):
+            TASKS = [t for t in math_tasks if "hendrycks_math" in t.lower()] or ["hendrycks_math"]
+            log(f"Selected math TASKS: {TASKS}")
+        else:
+            TASKS = [t.strip() for t in req_tasks.split(",") if t.strip()]
+
         COMPOSITE_GROUP = ["mmlu_pro", "bbh", "math", "ifeval"]
 
         PRELOAD_MAP = {
@@ -279,6 +302,26 @@ implementation:
             compact_results["composite_mean"] = round(composite_score, 6)
             log(f"Composite mean over {COMPOSITE_GROUP}: {composite_score}")
 
+        # Build schema-style JSON: each task -> rounded float score (if available), plus co2
+        schema = {}
+        for task, entry in compact_results.items():
+            if task == "co2_emissions_kg" or task == "composite_mean":
+                continue
+            if isinstance(entry, dict):
+                # find first numeric metric
+                for k, v in entry.items():
+                    if isinstance(v, (int, float)) and k != "time_s":
+                        try:
+                            schema[task] = round(float(v), 2)
+                        except Exception:
+                            pass
+                        break
+        try:
+            if compact_results.get("co2_emissions_kg") is not None:
+                schema["co2_emissions_kg"] = round(float(compact_results["co2_emissions_kg"]), 4)
+        except Exception:
+            schema["co2_emissions_kg"] = compact_results.get("co2_emissions_kg")
+
         # Save outputs
         try:
             with open(OUT_COMPACT, "w") as f:
@@ -293,6 +336,13 @@ implementation:
             log(f"Saved full results to: {OUT_FULL}")
         except Exception as e:
             log(f"Failed to save full results: {e}")
+
+        try:
+            with open(OUT_SCHEMA, "w") as f:
+                json.dump(schema, f, indent=2)
+            log(f"Saved schema JSON to: {OUT_SCHEMA}")
+        except Exception as e:
+            log(f"Failed to save schema JSON: {e}")
 
         # --- Print readable metrics + single-line machine JSON for easy extraction ---
         for task, data in compact_results.items():
@@ -318,13 +368,14 @@ implementation:
             metric_payload = {
                 "compact": safe_json(compact_results),
                 "full": safe_json(full_results),
-                "co2_kg": emissions_val
+                "co2_kg": emissions_val,
+                "schema": schema
             }
         except Exception:
-            metric_payload = {"compact": compact_results, "full": full_results, "co2_kg": emissions_val}
+            metric_payload = {"compact": compact_results, "full": full_results, "co2_kg": emissions_val, "schema": schema}
 
         # single-line JSON with stable prefix so CI / logs can extract it
-        metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False)
+        metric_line = "METRIC_JSON:" + json.dumps(metric_payload, separators=(",","":"), ensure_ascii=False)
         print(metric_line, flush=True)
         import sys
         print(metric_line, file=sys.stderr, flush=True)
@@ -349,3 +400,5 @@ implementation:
       - {outputPath: full_results}
       - --out_emissions
       - {outputPath: emissions_csv}
+      - --out_schema
+      - {outputPath: schema_json}
