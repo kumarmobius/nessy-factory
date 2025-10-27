@@ -17,15 +17,6 @@ outputs:
 implementation:
   container:
     image: kumar2004/latest:v4
-    resources:
-      requests:
-        cpu: "2"
-        memory: "8Gi"
-        ephemeral-storage: "5Gi"
-      limits:
-        cpu: "4"
-        memory: "16Gi"
-        ephemeral-storage: "10Gi"
     command:
       - python3
       - -u
@@ -34,6 +25,8 @@ implementation:
         import sys, os, json, traceback
         import numpy as np
         import torch
+        import shutil
+        import psutil
         from transformers import AutoTokenizer, AutoModelForCausalLM
         from lm_eval import evaluator
         TaskManager = None
@@ -118,13 +111,6 @@ implementation:
             TASKS = ["ifeval"]
         eprint("Evaluating tasks:", TASKS)
 
-        if torch.cuda.is_available():
-            eprint(f"Available GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        else:
-            eprint("No GPU available, using CPU")
-            import psutil
-            eprint(f"Available system RAM: {psutil.virtual_memory().total / 1e9:.2f} GB")
-            eprint(f"Available system RAM (free): {psutil.virtual_memory().available / 1e9:.2f} GB")
 
         
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -134,11 +120,27 @@ implementation:
 
         if torch.cuda.is_available():
             eprint(f"Available GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        else:
-            eprint("No GPU available, using CPU")
-            import psutil
             eprint(f"Available system RAM: {psutil.virtual_memory().total / 1e9:.2f} GB")
             eprint(f"Available system RAM (free): {psutil.virtual_memory().available / 1e9:.2f} GB")
+            mem = psutil.virtual_memory()
+            print(f"Total RAM: {mem.total / 1e9:.2f} GB")
+            print(f"Available RAM: {mem.available / 1e9:.2f} GB")
+
+            total, used, free = shutil.disk_usage("/")
+            print(f"Total storage: {total / 1e9:.2f} GB")
+            print(f"Free storage: {free / 1e9:.2f} GB")
+        else:
+            eprint("No GPU available, using CPU")
+        
+            eprint(f"Available system RAM: {psutil.virtual_memory().total / 1e9:.2f} GB")
+            eprint(f"Available system RAM (free): {psutil.virtual_memory().available / 1e9:.2f} GB")
+            mem = psutil.virtual_memory()
+            print(f"Total RAM: {mem.total / 1e9:.2f} GB")
+            print(f"Available RAM: {mem.available / 1e9:.2f} GB")
+
+            total, used, free = shutil.disk_usage("/")
+            print(f"Total storage: {total / 1e9:.2f} GB")
+            print(f"Free storage: {free / 1e9:.2f} GB")
 
         
         try:
