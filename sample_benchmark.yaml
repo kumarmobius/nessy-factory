@@ -148,10 +148,10 @@ implementation:
                 model="hf",
                 model_args=model_args,
                 tasks=TASKS,
-                batch_size="auto:1",
+                batch_size="4",
                 device=device,
                 num_fewshot=0,
-                limit=None
+                limit=100
             )
         except Exception as exc:
             eprint("FATAL eval error:", exc)
