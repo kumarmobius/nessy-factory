@@ -1,4 +1,4 @@
-name: Benchmarks
+name: Benchmark
 description: |
   Convert a Gemma3 / GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
 inputs:
@@ -36,7 +36,7 @@ outputs:
   - name: logs
     type: Data
   - name: schema_json
-    type: Data
+    type: String
 
 implementation:
   container:
