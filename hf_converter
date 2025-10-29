@@ -1,6 +1,6 @@
 name: HFConvertor
 description: |
-  Convert a  GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
+  Convert a GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   Uses named argparse flags. Core conversion logic is preserved from your uploaded script.
 inputs:
   - name: tokenizer_json
@@ -185,7 +185,6 @@ implementation:
         with open(os.path.join(MODEL_DIR, "generation_config.json"), "w") as f:
             json.dump(gen_cfg, f, indent=2)
 
-        # Copy the HF model folder into the converted artifact path
         print("[CONVERT] Copying HF folder to artifact dir:", OUT_CONVERTED)
         os.makedirs(OUT_CONVERTED, exist_ok=True)
         for root, dirs, files in os.walk(MODEL_DIR):
@@ -198,24 +197,15 @@ implementation:
         print("[CONVERT] Conversion completed successfully.")
         print("[CONVERT] Artifact available at:", OUT_CONVERTED)
         PY
-        python3 -u /tmp/convert_to_hf.py \
-          --src_pt "{inputPath: model_pt}" \
-          --tokenizer_json "{inputPath: tokenizer_json}" \
-          --base_cfg_json "{inputPath: model_config_json}" \
-          --model_dir "{inputValue: output_model_dir}" \
-          --out_converted "{outputPath: converted_model}"
+        python3 -u /tmp/convert_to_hf.py "$@"
     args:
+      - --src_pt
+      - {inputPath: model_pt}
       - --tokenizer_json
       - {inputPath: tokenizer_json}
-      - --model_pt
-      - {inputPath: model_pt}
-      - --model_config_json
+      - --base_cfg_json
       - {inputPath: model_config_json}
-      - --cache_dir
-      - {inputValue: cache_dir}
-      - --output_model_dir
+      - --model_dir
       - {inputValue: output_model_dir}
-      - --max_new_tokens
-      - {inputValue: max_new_tokens}
       - --out_converted
       - {outputPath: converted_model}
