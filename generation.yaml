@@ -1,5 +1,5 @@
-name: SLM_Inference
-description: Loads Gemma3Model and generates text for a list of prompts; writes JSON string to a String output
+name: Run Gemma3 Inference (Generation Only)
+description: Loads Gemma3Model and generates text for a list of prompts; writes JSON to a Data output file
 inputs:
   - name: tokenizer_json
     type: Model
@@ -30,8 +30,8 @@ inputs:
     description: Sample only from top-k tokens
 outputs:
   - name: generations_json
-    type: String
-    description: JSON string with prompts and generated outputs
+    type: Data
+    description: File whose contents are the JSON string of prompts and generated outputs
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
@@ -128,21 +128,16 @@ implementation:
             for _ in range(steps):
                 with torch.no_grad():
                     logits = model(x)[0][0, -1]
-
                 logits = logits / temp
-
                 if top_k is not None and top_k > 0:
                     k = min(int(top_k), logits.shape[0])
                     thresh = torch.topk(logits, k).values[-1]
                     logits[logits < thresh] = -float("inf")
-
                 probs = F.softmax(logits, dim=-1)
                 next_id = torch.multinomial(probs, 1).item()
                 ids.append(next_id)
-
                 if eos_id is not None and next_id == eos_id:
                     break
-
                 if len(ids) > context_len:
                     ids = ids[-context_len:]
                 x = torch.tensor([ids], dtype=torch.long, device=torch_device)
