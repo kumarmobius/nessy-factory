@@ -1,4 +1,4 @@
-name: BenchmarksEvals
+name: BenchmarksEval
 description: |
   Evaluate a local HF-style model folder (converted_model) on lm-eval tasks.
 inputs:
@@ -15,7 +15,7 @@ inputs:
     default: /tmp/hf_cache
   - name: max_new_tokens
     type: Integer
-    default: "64"
+    default: 64
   - name: out_compact
     type: Data
     default: /tmp/outputs/benchmark_compact.json
@@ -59,8 +59,8 @@ implementation:
         from codecarbon import EmissionsTracker
 
         def log(msg):
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            print("[EVAL " + ts + "] " + str(msg), flush=True)
+            ts = time.strftime('%Y-%m-%d %H:%M:%S')
+            print('[EVAL ' + ts + '] ' + str(msg), flush=True)
 
         def safe_json(obj):
             if isinstance(obj, dict):
@@ -68,7 +68,7 @@ implementation:
             if isinstance(obj, (list, tuple)):
                 return [safe_json(v) for v in obj]
             try:
-                if hasattr(obj, "item"):
+                if hasattr(obj, 'item'):
                     return obj.item()
             except Exception:
                 pass
@@ -83,7 +83,7 @@ implementation:
             return obj
 
         def pick_metric(d):
-            for k in ("acc_norm", "acc", "accuracy"):
+            for k in ('acc_norm', 'acc', 'accuracy'):
                 if k in d and isinstance(d[k], (int, float)):
                     return k, float(d[k])
             for k, v in d.items():
@@ -93,44 +93,41 @@ implementation:
 
         def write_json(path, obj):
             try:
-                with open(path, "w") as f:
+                with open(path, 'w') as f:
                     json.dump(safe_json(obj), f, indent=2)
-                log("Wrote JSON -> " + path)
+                log('Wrote JSON -> ' + path)
             except Exception as e:
-                log("Failed to write JSON " + path + ": " + str(e))
+                log('Failed to write JSON ' + path + ': ' + str(e))
 
         def make_logs_tgz(log_dir, tgz_path):
             try:
-                # ensure log_dir exists
                 os.makedirs(log_dir, exist_ok=True)
-                # create a simple metrics file for convenience
-                meta_f = os.path.join(log_dir, "metrics.json")
-                with open(meta_f, "w") as mf:
-                    mf.write("{}")
-                # create tar.gz
-                with tarfile.open(tgz_path, "w:gz") as tar:
+                meta_f = os.path.join(log_dir, 'metrics.json')
+                with open(meta_f, 'w') as mf:
+                    mf.write('{}')
+                with tarfile.open(tgz_path, 'w:gz') as tar:
                     for fname in os.listdir(log_dir):
                         tar.add(os.path.join(log_dir, fname), arcname=fname)
-                log("Created logs tarball: " + tgz_path)
+                log('Created logs tarball: ' + tgz_path)
             except Exception as e:
-                log("Failed to create logs tarball: " + str(e))
+                log('Failed to create logs tarball: ' + str(e))
 
         def format_co2(val):
             try:
-                return "{:.4f} kg".format(float(val))
+                return '{:.4f} kg'.format(float(val))
             except Exception:
                 return str(val)
 
         parser = argparse.ArgumentParser()
-        parser.add_argument("--converted_model", required=True)
-        parser.add_argument("--hf_token", default="")
-        parser.add_argument("--tasks", default="gpqa,mmlu_pro,bbh,math,ifeval")
-        parser.add_argument("--cache_dir", default="/tmp/hf_cache")
-        parser.add_argument("--max_new_tokens", type=int, default=64)
-        parser.add_argument("--out_compact", default="/tmp/outputs/benchmark_compact.json")
-        parser.add_argument("--out_full", default="/tmp/outputs/benchmark_full.json")
-        parser.add_argument("--out_emissions", default="/tmp/outputs/emissions.csv")
-        parser.add_argument("--out_schema", default="/tmp/outputs/schema.json")
+        parser.add_argument('--converted_model', required=True)
+        parser.add_argument('--hf_token', default='')
+        parser.add_argument('--tasks', default='gpqa,mmlu_pro,bbh,math,ifeval')
+        parser.add_argument('--cache_dir', default='/tmp/hf_cache')
+        parser.add_argument('--max_new_tokens', type=int, default=64)
+        parser.add_argument('--out_compact', default='/tmp/outputs/benchmark_compact.json')
+        parser.add_argument('--out_full', default='/tmp/outputs/benchmark_full.json')
+        parser.add_argument('--out_emissions', default='/tmp/outputs/emissions.csv')
+        parser.add_argument('--out_schema', default='/tmp/outputs/schema.json')
         args = parser.parse_args()
 
         CONVERTED = os.path.abspath(args.converted_model)
@@ -139,52 +136,50 @@ implementation:
         OUT_FULL = os.path.abspath(args.out_full)
         OUT_EMISSIONS = os.path.abspath(args.out_emissions)
         OUT_SCHEMA = os.path.abspath(args.out_schema)
-        LOG_DIR = os.path.join(os.path.dirname(OUT_COMPACT) or "/tmp", "logs")
-        LOG_TGZ = os.path.join(os.path.dirname(OUT_COMPACT) or "/tmp", "logs", "data.tgz")
+        LOG_DIR = os.path.join(os.path.dirname(OUT_COMPACT) or '/tmp', 'logs')
+        LOG_TGZ = os.path.join(os.path.dirname(OUT_COMPACT) or '/tmp', 'logs', 'data.tgz')
 
         for d in [os.path.dirname(OUT_COMPACT), os.path.dirname(OUT_FULL), os.path.dirname(OUT_EMISSIONS), os.path.dirname(OUT_SCHEMA), CACHE, LOG_DIR]:
             if d:
                 try:
                     os.makedirs(d, exist_ok=True)
                 except Exception as e:
-                    log("Warning creating dir " + str(d) + ": " + str(e))
+                    log('Warning creating dir ' + str(d) + ': ' + str(e))
 
-        TOKEN = args.hf_token or ""
+        TOKEN = args.hf_token or ''
         if TOKEN:
-            os.environ["HUGGINGFACE_HUB_TOKEN"] = TOKEN
-            os.environ["HF_TOKEN"] = TOKEN
+            os.environ['HUGGINGFACE_HUB_TOKEN'] = TOKEN
+            os.environ['HF_TOKEN'] = TOKEN
             try:
                 HfFolder.save_token(TOKEN)
             except Exception as e:
-                log("Warning saving HF token: " + str(e))
+                log('Warning saving HF token: ' + str(e))
 
         os.environ.update({
-            "HF_HUB_DISABLE_TELEMETRY": "1",
-            "HF_HOME": CACHE,
-            "HF_DATASETS_CACHE": CACHE,
-            "HUGGINGFACE_HUB_CACHE": CACHE
+            'HF_HUB_DISABLE_TELEMETRY': '1',
+            'HF_HOME': CACHE,
+            'HF_DATASETS_CACHE': CACHE,
+            'HUGGINGFACE_HUB_CACHE': CACHE
         })
 
-        # Detect math tasks with TaskManager if user asked for math
         try:
             tm = TaskManager()
             avail = set(tm.task_index)
-            math_tasks = sorted([t for t in avail if "math" in t.lower() or "hendrycks_math" in t.lower()])
-            log("Available math-related tasks: " + str(math_tasks))
+            math_tasks = sorted([t for t in avail if 'math' in t.lower() or 'hendrycks_math' in t.lower()])
+            log('Available math-related tasks: ' + str(math_tasks))
         except Exception as e:
-            log("TaskManager math detection failed: " + str(e))
+            log('TaskManager math detection failed: ' + str(e))
             math_tasks = []
 
         req_tasks = args.tasks.strip()
-        if req_tasks.lower() in ("math", "math_auto"):
-            TASKS = [t for t in math_tasks if "hendrycks_math" in t] or ["hendrycks_math"]
-            log("Selected math TASKS group-run: " + str(TASKS))
+        if req_tasks.lower() in ('math', 'math_auto'):
+            TASKS = [t for t in math_tasks if 'hendrycks_math' in t] or ['hendrycks_math']
+            log('Selected math TASKS group-run: ' + str(TASKS))
         else:
-            TASKS = [t.strip() for t in req_tasks.split(",") if t.strip()]
-            log("Selected TASKS: " + str(TASKS))
+            TASKS = [t.strip() for t in req_tasks.split(',') if t.strip()]
+            log('Selected TASKS: ' + str(TASKS))
 
-        # Preload map and helper
-        PRELOAD_MAP = { "gpqa": [("Idavidrein/gpqa", "gpqa_main")] }
+        PRELOAD_MAP = { 'gpqa': [('Idavidrein/gpqa', 'gpqa_main')] }
         def _preload_for_task(task):
             entries = PRELOAD_MAP.get(task.lower())
             if not entries:
@@ -192,35 +187,33 @@ implementation:
             ok = False
             for repo, split in entries:
                 try:
-                    log("Preloading " + repo + "::" + split)
+                    log('Preloading ' + repo + '::' + split)
                     try:
                         load_dataset(repo, split, cache_dir=CACHE, token=TOKEN)
                     except TypeError:
                         load_dataset(repo, split, cache_dir=CACHE, use_auth_token=TOKEN)
                     ok = True
                 except Exception as e:
-                    log("Preload failed " + repo + "::" + split + " : " + str(e))
+                    log('Preload failed ' + repo + '::' + split + ' : ' + str(e))
             return ok
-        # Start tracker
-        log("Starting emissions tracker -> " + OUT_EMISSIONS)
-        tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or ".", output_file=os.path.basename(OUT_EMISSIONS))
+
+        log('Starting emissions tracker -> ' + OUT_EMISSIONS)
+        tracker = EmissionsTracker(output_dir=os.path.dirname(OUT_EMISSIONS) or '.', output_file=os.path.basename(OUT_EMISSIONS))
         tracker.start()
 
-        # Load tokenizer + model (single validate/load)
         try:
-            log("Loading tokenizer + model from: " + CONVERTED)
+            log('Loading tokenizer + model from: ' + CONVERTED)
             tokenizer = AutoTokenizer.from_pretrained(CONVERTED, trust_remote_code=False)
             _ = AutoModelForCausalLM.from_pretrained(CONVERTED, trust_remote_code=False)
-            log("Loaded tokenizer and model")
+            log('Loaded tokenizer and model')
         except Exception as e:
             tb = traceback.format_exc()
-            log("FATAL: model/tokenizer load failed: " + str(e))
+            log('FATAL: model/tokenizer load failed: ' + str(e))
             print(tb, flush=True)
-            # write minimal outputs so artifacts exist
-            write_json(OUT_COMPACT, {"__fatal__": str(e)})
-            write_json(OUT_FULL, {"__fatal__": str(e), "traceback": tb})
+            write_json(OUT_COMPACT, {'__fatal__': str(e)})
+            write_json(OUT_FULL, {'__fatal__': str(e), 'traceback': tb})
             try:
-                with open(os.path.join(LOG_DIR, "error.txt"), "w") as lf:
+                with open(os.path.join(LOG_DIR, 'error.txt'), 'w') as lf:
                     lf.write(tb)
             except Exception:
                 pass
@@ -231,34 +224,32 @@ implementation:
                 pass
             raise
 
-        # Single evaluator call for all requested TASKS (grouped math or normal)
         try:
-            # preload any datasets needed
             for t in TASKS:
                 _preload_for_task(t)
 
-            log("Running evaluator.simple_evaluate for tasks: " + str(TASKS))
+            log('Running evaluator.simple_evaluate for tasks: ' + str(TASKS))
             start_t = time.time()
             results = evaluator.simple_evaluate(
-                model="hf",
-                model_args="pretrained=" + CONVERTED + ",tokenizer=" + CONVERTED + ",trust_remote_code=False",
+                model='hf',
+                model_args='pretrained=' + CONVERTED + ',tokenizer=' + CONVERTED + ',trust_remote_code=False',
                 tasks=TASKS,
-                batch_size="6",
-                device=("cuda:0" if torch.cuda.is_available() else "cpu"),
+                batch_size=6,
+                device=('cuda:0' if torch.cuda.is_available() else 'cpu'),
                 num_fewshot=0,
                 limit=100
             )
             duration_all = time.time() - start_t
-            log("Evaluator run completed in {:.1f}s".format(duration_all))
+            log('Evaluator run completed in {:.1f}s'.format(duration_all))
 
         except Exception as e:
             tb = traceback.format_exc()
-            log("FATAL: evaluator.simple_evaluate failed: " + str(e))
+            log('FATAL: evaluator.simple_evaluate failed: ' + str(e))
             print(tb, flush=True)
-            write_json(OUT_COMPACT, {"__fatal__": str(e)})
-            write_json(OUT_FULL, {"__fatal__": str(e), "traceback": tb})
+            write_json(OUT_COMPACT, {'__fatal__': str(e)})
+            write_json(OUT_FULL, {'__fatal__': str(e), 'traceback': tb})
             try:
-                with open(os.path.join(LOG_DIR, "error.txt"), "w") as lf:
+                with open(os.path.join(LOG_DIR, 'error.txt'), 'w') as lf:
                     lf.write(tb)
             except Exception:
                 pass
@@ -269,11 +260,10 @@ implementation:
                 pass
             raise
 
-        # Process results into compact + full
         try:
             res_safe = safe_json(results)
-            res_dict = res_safe.get("results", {}) if isinstance(res_safe, dict) else {}
-            full_results = {"results": res_dict, "metadata": {"model": CONVERTED, "task_count": len(TASKS), "runner": "lm-eval"}}
+            res_dict = res_safe.get('results', {}) if isinstance(res_safe, dict) else {}
+            full_results = {'results': res_dict, 'metadata': {'model': CONVERTED, 'task_count': len(TASKS), 'runner': 'lm-eval'}}
             compact_results = {}
             for task_name, task_res in res_dict.items():
                 if isinstance(task_res, dict):
@@ -281,11 +271,10 @@ implementation:
                     if metric_name is not None:
                         compact_results[task_name] = {metric_name: metric_value}
                     else:
-                        compact_results[task_name] = {"note": "no numeric metric found"}
+                        compact_results[task_name] = {'note': 'no numeric metric found'}
                 else:
-                    compact_results[task_name] = {"note": "unexpected result structure"}
+                    compact_results[task_name] = {'note': 'unexpected result structure'}
 
-            # emissions
             try:
                 emissions_val = float(tracker.stop() or 0.0)
             except Exception:
@@ -293,17 +282,14 @@ implementation:
 
             emissions_str = format_co2(emissions_val) if emissions_val is not None else None
 
-            # attach CO2 to outputs
-            compact_results["co2_emissions_kg"] = emissions_str
-            full_results["co2_emissions_kg"] = emissions_str
+            compact_results['co2_emissions_kg'] = emissions_str
+            full_results['co2_emissions_kg'] = emissions_str
 
-            # build schema: simple rounded numeric for each task
             schema = {}
             for task, data in compact_results.items():
-                if task in ("co2_emissions_kg",):
+                if task in ('co2_emissions_kg',):
                     continue
                 if isinstance(data, dict):
-                    # pick first numeric
                     val = None
                     for k, v in data.items():
                         if isinstance(v, (int, float)):
@@ -316,46 +302,41 @@ implementation:
                             pass
 
             if emissions_str is not None:
-                schema["co2_emissions_kg"] = emissions_str
+                schema['co2_emissions_kg'] = emissions_str
 
-            # save outputs
             write_json(OUT_FULL, full_results)
             write_json(OUT_COMPACT, compact_results)
             write_json(OUT_SCHEMA, schema)
-            # create emissions CSV minimal
-            try:
-                with open(OUT_EMISSIONS, "w") as ef:
-                    ef.write("co2_kg\n")
-                    if emissions_val is not None:
-                        ef.write(str(emissions_val) + "\n")
-                    else:
-                        ef.write("\n")
-            except Exception as e:
-                log("Failed to write emissions CSV: " + str(e))
 
-            # prepare logs tarball so Argo can collect logs
             try:
-                # write human-readable files into LOG_DIR
-                with open(os.path.join(LOG_DIR, "compact.json"), "w") as lf:
+                with open(OUT_EMISSIONS, 'w') as ef:
+                    ef.write('co2_kg\n')
+                    if emissions_val is not None:
+                        ef.write(str(emissions_val) + '\n')
+                    else:
+                        ef.write('\n')
+            except Exception as e:
+                log('Failed to write emissions CSV: ' + str(e))
+
+            try:
+                with open(os.path.join(LOG_DIR, 'compact.json'), 'w') as lf:
                     json.dump(compact_results, lf, indent=2)
-                with open(os.path.join(LOG_DIR, "full.json"), "w") as lf:
+                with open(os.path.join(LOG_DIR, 'full.json'), 'w') as lf:
                     json.dump(full_results, lf, indent=2)
-                # create tarball
                 make_logs_tgz(LOG_DIR, LOG_TGZ)
             except Exception as e:
-                log("Failed to prepare logs artifact: " + str(e))
+                log('Failed to prepare logs artifact: ' + str(e))
 
-            # print single-line JSON for easy parsing by CI
-            metric_payload = {"compact": compact_results, "full": full_results, "schema": schema, "co2": emissions_str}
-            print("METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False), flush=True)
-            print("METRIC_JSON:" + json.dumps(metric_payload, separators=(",", ":"), ensure_ascii=False), file=os.sys.stderr, flush=True)
+            metric_payload = {'compact': compact_results, 'full': full_results, 'schema': schema, 'co2': emissions_str}
+            print('METRIC_JSON:' + json.dumps(metric_payload, separators=(',', ':'), ensure_ascii=False), flush=True)
+            print('METRIC_JSON:' + json.dumps(metric_payload, separators=(',', ':'), ensure_ascii=False), file=os.sys.stderr, flush=True)
 
         except Exception as e:
             tb = traceback.format_exc()
-            log("Postprocessing error: " + str(e))
+            log('Postprocessing error: ' + str(e))
             print(tb, flush=True)
-            write_json(OUT_COMPACT, {"__fatal__": str(e)})
-            write_json(OUT_FULL, {"__fatal__": str(e), "traceback": tb})
+            write_json(OUT_COMPACT, {'__fatal__': str(e)})
+            write_json(OUT_FULL, {'__fatal__': str(e), 'traceback': tb})
             try:
                 if tracker:
                     tracker.stop()
@@ -363,10 +344,9 @@ implementation:
                 pass
             raise
 
-        log("hf_eval finished successfully")
+        log('hf_eval finished successfully')
         PY
-        # execute script forwarding args
-        exec python3 -u /tmp/hf_eval.py "$0" "$@"
+        python3 -u /tmp/hf_eval.py "$@"
     args:
       - --converted_model
       - {inputPath: converted_model}
