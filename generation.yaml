@@ -1,5 +1,5 @@
-name: SLM_inference
-description: Loads Gemma3Model and generates text for a list of prompts; outputs JSON string to stdout
+name: SLM_Inference
+description: Loads Gemma3Model and generates text for a list of prompts; writes JSON string to a String output
 inputs:
   - name: tokenizer_json
     type: Model
@@ -90,6 +90,7 @@ implementation:
         parser.add_argument("--max_new_tokens", type=int, default=64)
         parser.add_argument("--temperature", type=float, default=1.0)
         parser.add_argument("--top_k", type=int, default=50)
+        parser.add_argument("--generations_json", type=str, required=True)  # outputPath
         args = parser.parse_args()
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -153,8 +154,9 @@ implementation:
         prompts = raw if isinstance(raw, list) else [str(raw)]
         results = [{"prompt": p, "output": generate_text(p, args.max_new_tokens, args.temperature, args.top_k)} for p in prompts]
 
-        # Print ONLY the JSON string to stdout so the runner captures it as the String output.
-        print(json.dumps(results, ensure_ascii=False))
+        os.makedirs(os.path.dirname(args.generations_json) or ".", exist_ok=True)
+        with open(args.generations_json, "w", encoding="utf-8") as f:
+            f.write(json.dumps(results, ensure_ascii=False))
 
 args:
   - --tokenizer_json
@@ -173,4 +175,5 @@ args:
   - {inputValue: temperature}
   - --top_k
   - {inputValue: top_k}
-  - {outputValue: generations_json}
+  - --generations_json
+  - {outputPath: generations_json}
