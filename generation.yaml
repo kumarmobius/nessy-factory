@@ -1,5 +1,5 @@
-name: LM_Inference
-description: Loads Gemma3Model and generates text for prompts; writes JSON to a Data output file
+name: Run Gemma3 Inference (Generation Only)
+description: Generate text with Gemma3Model for a list of prompts; write JSON to a file output
 inputs:
   - name: tokenizer_json
     type: Model
@@ -15,7 +15,7 @@ inputs:
     description: Path to learned model weights file
   - name: prompts_json
     type: String
-    description: JSON string containing a list of prompt strings
+    description: JSON string with a list of prompt strings
   - name: max_new_tokens
     type: Integer
     default: "64"
@@ -27,11 +27,11 @@ inputs:
   - name: top_k
     type: Integer
     default: "50"
-    description: Sample only from top-k tokens
+    description: Sample only from top-k tokens; set 0 to disable
 outputs:
   - name: generations_json
     type: Data
-    description: File whose contents are the JSON string of prompts and generated outputs
+    description: File containing the JSON string of prompts and generated outputs
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
@@ -65,8 +65,6 @@ implementation:
                 import shutil
                 shutil.copyfile(py_path, tmp)
                 py_path = tmp
-            if not os.path.exists(py_path):
-                raise FileNotFoundError(f"Model file not found: {py_path}")
             spec = importlib.util.spec_from_file_location(mod_name, py_path)
             if spec is None or spec.loader is None:
                 raise ImportError(f"Cannot load module from: {py_path}")
@@ -129,7 +127,7 @@ implementation:
                 with torch.no_grad():
                     logits = model(x)[0][0, -1]
                 logits = logits / temp
-                if top_k is not None and top_k > 0:
+                if top_k and top_k > 0:
                     k = min(int(top_k), logits.shape[0])
                     thresh = torch.topk(logits, k).values[-1]
                     logits[logits < thresh] = -float("inf")
