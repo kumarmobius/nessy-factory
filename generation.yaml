@@ -1,5 +1,5 @@
-name: Run Gemma3 Inference (Generation Only)
-description: Loads Gemma3Model and generates text for a list of prompts; writes JSON to a Data output file
+name: LM_Inference
+description: Loads Gemma3Model and generates text for prompts; writes JSON to a Data output file
 inputs:
   - name: tokenizer_json
     type: Model
@@ -18,15 +18,15 @@ inputs:
     description: JSON string containing a list of prompt strings
   - name: max_new_tokens
     type: Integer
-    default: "64"
+    default: 64
     description: Maximum number of tokens to generate
   - name: temperature
     type: Float
-    default: "1.0"
+    default: 1.0
     description: Sampling temperature
   - name: top_k
     type: Integer
-    default: "50"
+    default: 50
     description: Sample only from top-k tokens
 outputs:
   - name: generations_json
@@ -90,7 +90,7 @@ implementation:
         parser.add_argument("--max_new_tokens", type=int, default=64)
         parser.add_argument("--temperature", type=float, default=1.0)
         parser.add_argument("--top_k", type=int, default=50)
-        parser.add_argument("--generations_json", type=str, required=True)  # outputPath
+        parser.add_argument("--generations_json", type=str, required=True)
         args = parser.parse_args()
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -152,23 +152,22 @@ implementation:
         os.makedirs(os.path.dirname(args.generations_json) or ".", exist_ok=True)
         with open(args.generations_json, "w", encoding="utf-8") as f:
             f.write(json.dumps(results, ensure_ascii=False))
-
-args:
-  - --tokenizer_json
-  - {inputPath: tokenizer_json}
-  - --model_py
-  - {inputPath: model_py}
-  - --model_config
-  - {inputPath: model_config}
-  - --learned_weights
-  - {inputPath: learned_weights}
-  - --prompts_json
-  - {inputValue: prompts_json}
-  - --max_new_tokens
-  - {inputValue: max_new_tokens}
-  - --temperature
-  - {inputValue: temperature}
-  - --top_k
-  - {inputValue: top_k}
-  - --generations_json
-  - {outputPath: generations_json}
+    args:
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --model_py
+      - {inputPath: model_py}
+      - --model_config
+      - {inputPath: model_config}
+      - --learned_weights
+      - {inputPath: learned_weights}
+      - --prompts_json
+      - {inputValue: prompts_json}
+      - --max_new_tokens
+      - {inputValue: max_new_tokens}
+      - --temperature
+      - {inputValue: temperature}
+      - --top_k
+      - {inputValue: top_k}
+      - --generations_json
+      - {outputPath: generations_json}
