@@ -1,7 +1,7 @@
-name: Run Gemma3 Inference (Generation only)
+name: Run Inference
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
-  This task uses the same robust loading/generation logic as the example but does NOT compute ROUGE/BLEU or require ground-truth targets.
+  This version accepts test_data_json as either (A) a JSON string or (B) a path to a JSON file and prints helpful debug info.
 inputs:
   - name: tokenizer_json
     type: Model
@@ -17,7 +17,7 @@ inputs:
     description: Path to learned model weights file
   - name: test_data_json
     type: String
-    description: JSON string containing a list of input prompt strings, e.g. ["prompt1", "prompt2", ...]
+    description: JSON string containing a list of input prompt strings OR a path to a JSON file containing that list
   - name: max_new_tokens
     type: Integer
     default: "64"
@@ -48,10 +48,10 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, importlib.util, json, os, torch
+        import argparse, importlib, importlib.util, json, os, sys, shutil
+        import torch
         from tokenizers import Tokenizer
         import torch.nn.functional as F
-        import shutil
 
         def find_model_py_file(directory):
             print(f"[DEBUG] Searching for .py file in: {directory}")
@@ -60,9 +60,8 @@ implementation:
                 return directory
             if not os.path.isdir(directory):
                 raise ValueError(f"Path {directory} is neither a file nor a directory")
-            contents = os.listdir(directory)
-            print(f"[DEBUG] Directory contents: {contents}")
-            py_files = [os.path.join(directory, f) for f in contents if f.endswith('.py')]
+            print(f"[DEBUG] Directory contents: {os.listdir(directory)}")
+            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.py')]
             if not py_files:
                 raise FileNotFoundError(f"No .py file found in directory {directory}")
             if len(py_files) > 1:
@@ -90,7 +89,8 @@ implementation:
         parser.add_argument("--model_py", type=str, required=True)
         parser.add_argument("--model_config", type=str, required=True)
         parser.add_argument("--learned_weights", type=str, required=True)
-        parser.add_argument("--test_data_json", type=str, required=True)
+        parser.add_argument("--test_data_json", type=str, required=True,
+                            help="Either a JSON string like '[\"a\",\"b\"]' OR a path to a .json file")
         parser.add_argument("--max_new_tokens", type=int, default=64)
         parser.add_argument("--temperature", type=float, default=1.0)
         parser.add_argument("--top_k", type=int, default=50)
@@ -106,29 +106,33 @@ implementation:
         print(f"[DEBUG] Loading tokenizer from: {args.tokenizer_json}")
         tok = Tokenizer.from_file(args.tokenizer_json)
 
-        # robust bos/eos id resolution
         def token_id_any(tok, candidates):
             for c in candidates:
-                tid = tok.token_to_id(c)
+                try:
+                    tid = tok.token_to_id(c)
+                except Exception:
+                    tid = None
                 if tid is not None:
                     return tid
             return None
 
         bos_id = token_id_any(tok, ["<s>", "<bos>"])
         eos_id = token_id_any(tok, ["</s>", "<eos>"])
-
         print(f"[DEBUG] bos_id={bos_id}, eos_id={eos_id}")
 
+        # load model config
         with open(args.model_config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         cfg["dtype"] = model_dtype
 
+        # find & load model code
         print(f"[DEBUG] Finding model .py file...")
         model_py_path = find_model_py_file(args.model_py)
         print(f"[DEBUG] Loading model code from: {model_py_path}")
         mod = load_module_from_path(model_py_path, "gemma3_model")
         Gemma3Model = getattr(mod, "Gemma3Model")
 
+        # instantiate model
         print(f"[DEBUG] Instantiating model")
         model = Gemma3Model(cfg).to(torch_device)
         state = torch.load(args.learned_weights, map_location=torch_device)
@@ -142,37 +146,57 @@ implementation:
             if bos_id is not None:
                 ids = [bos_id] + ids
             x = torch.tensor([ids], dtype=torch.long, device=torch_device)
-
             for _ in range(max_new_tokens):
                 with torch.no_grad():
                     model_output = model(x)[0]
                     logits = model_output[0, -1]
-
                 logits = logits / (temperature if temperature > 0 else 1.0)
-
                 if top_k is not None and top_k > 0:
                     kth = torch.topk(logits, min(top_k, logits.shape[-1])).values[-1]
                     indices_to_remove = logits < kth
                     logits[indices_to_remove] = -float("Inf")
-
                 probs = F.softmax(logits, dim=-1)
                 next_id = torch.multinomial(probs, 1).item()
                 ids.append(next_id)
-
                 if eos_id is not None and next_id == eos_id:
                     break
-
                 if len(ids) > context_len:
                     ids = ids[-context_len:]
                 x = torch.tensor([ids], dtype=torch.long, device=torch_device)
-
             dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
             return tok.decode(dec_ids)
 
-        # test_data_json is expected to be a JSON list of prompt strings
-        test_data = json.loads(args.test_data_json)
+        # -------- Robust test_data_json loading --------
+        td = args.test_data_json
+        print(f"[DEBUG] Raw test_data_json length={len(td)}; preview (first 1000 chars):")
+        print(td[:1000])
+        test_data = None
+        # if the arg is a path to an existing file, load it
+        if os.path.exists(td):
+            print(f"[DEBUG] Detected {td} as file path. Attempting to open as JSON file.")
+            try:
+                with open(td, "r", encoding="utf-8") as fh:
+                    test_data = json.load(fh)
+            except Exception as e:
+                print(f"[ERROR] Failed to parse JSON file {td}: {e}")
+                raise
+        else:
+            # try to parse as JSON string
+            try:
+                test_data = json.loads(td)
+            except json.JSONDecodeError as e:
+                # helpful debug and re-raise
+                print("[ERROR] json.loads failed on --test_data_json string.")
+                print(f"[ERROR] json.decoder message: {e.msg} (pos {e.pos})")
+                # show repr of the string trimmed to 2000 chars so you can inspect escaping
+                sample = repr(td[:2000])
+                print(f"[ERROR] test_data_json repr preview (truncated): {sample}")
+                raise RuntimeError("Invalid JSON passed to --test_data_json. "
+                                   "Either pass a valid JSON string (e.g. '[\"a\",\"b\"]') "
+                                   "or pass a file path to a .json file containing the list.") from e
+
         if not isinstance(test_data, list):
-            raise ValueError("test_data_json must be a JSON list of input prompt strings")
+            raise ValueError("test_data must be a JSON list of input prompt strings (e.g. [\"prompt1\",\"prompt2\"])")
 
         print(f"[DEBUG] Processing {len(test_data)} prompts")
 
