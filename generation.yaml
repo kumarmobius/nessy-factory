@@ -18,15 +18,15 @@ inputs:
     description: JSON string containing a list of prompt strings
   - name: max_new_tokens
     type: Integer
-    default: 64
+    default: "64"
     description: Maximum number of tokens to generate
   - name: temperature
     type: Float
-    default: 1.0
+    default: "0.9"
     description: Sampling temperature
   - name: top_k
     type: Integer
-    default: 50
+    default: "50"
     description: Sample only from top-k tokens
 outputs:
   - name: generations_json
