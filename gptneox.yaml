@@ -1,0 +1,349 @@
+name: GPTNEOX
+description: Builds an untrained TinyGPTNeoX model from tokenizer vocab and hyperparams, saves initial weights, config, and model source.
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: num_layers
+    type: Integer
+    default: "4"
+outputs:
+  - name: model_weights
+    type: Model
+  - name: model_config
+    type: Data
+  - name: model_py
+    type: Data
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import subprocess, sys, os, json, argparse, importlib.util
+        from typing import Dict, Any
+
+        # === Install dependencies ===
+        subprocess.run(
+          [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+           "torch", "tokenizers", "torchinfo", "numpy"],
+          check=True
+        )
+
+        from torchinfo import summary
+        import torch
+        from tokenizers import Tokenizer
+
+        # === embedded model source (written to model_py) ===
+        MODEL_PY = '''
+        import math
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from typing import Any, Dict
+        
+        def rotate_half(x):
+            orig_shape = x.shape
+            rotary_dim = orig_shape[-1]
+            x = x.view(*orig_shape[:-1], rotary_dim // 2, 2)
+            x1 = x[..., 0]
+            x2 = x[..., 1]
+            out = torch.stack((-x2, x1), dim=-1).reshape_as(torch.empty(0, device=x.device, dtype=x.dtype).new_empty(orig_shape))
+            return out
+        
+        def apply_rotary_pos_emb(q, k, sin, cos):
+            q_rot = (q * cos) + (rotate_half(q) * sin)
+            k_rot = (k * cos) + (rotate_half(k) * sin)
+            return q_rot, k_rot
+        
+        def make_rotary_sin_cos(seq_len, rotary_dim, device=torch.device("cpu"), dtype=torch.float32):
+            assert rotary_dim % 2 == 0, "rotary_dim must be even"
+            inv_freq = 1.0 / (10000 ** (torch.arange(0, rotary_dim, 2, device=device, dtype=dtype) / rotary_dim))
+            positions = torch.arange(seq_len, device=device, dtype=dtype)
+            freqs = torch.einsum("i,j->ij", positions, inv_freq) 
+            emb = torch.cat((freqs, freqs), dim=-1) 
+            return emb.sin(), emb.cos()
+        
+        class NeoXAttention(nn.Module):
+            def __init__(self, hidden_size, num_heads, rotary_pct=0.25, dropout=0.0):
+                super().__init__()
+                assert hidden_size % num_heads == 0
+                self.hidden_size = hidden_size
+                self.num_heads = num_heads
+                self.head_dim = hidden_size // num_heads
+                self.rotary_pct = rotary_pct
+                self.rotary_dim = int(self.head_dim * rotary_pct)
+                if self.rotary_dim % 2 != 0:
+                    self.rotary_dim -= 1
+                self.qkv_proj = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+                self.out_proj = nn.Linear(hidden_size, hidden_size, bias=True)
+                self.dropout = nn.Dropout(dropout)
+        
+            def _split_heads(self, x):
+                B, T, H = x.shape
+                x = x.view(B, T, self.num_heads, self.head_dim)
+        
+                return x.permute(0, 2, 1, 3)
+        
+            def forward(self, x, sin=None, cos=None, attn_mask=None, past_kv=None):
+        
+                B, T, H = x.shape
+                qkv = self.qkv_proj(x)
+                qkv = qkv.view(B, T, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+                q, k, v = qkv[0], qkv[1], qkv[2] 
+        
+                if self.rotary_dim > 0 and sin is not None and cos is not None:
+                    sin_v = sin[:T].to(q.dtype).to(q.device)
+                    cos_v = cos[:T].to(q.dtype).to(q.device)
+                    sin_v = sin_v.view(1, 1, T, self.rotary_dim)
+                    cos_v = cos_v.view(1, 1, T, self.rotary_dim)
+        
+                    q_rot, q_pass = q[..., :self.rotary_dim], q[..., self.rotary_dim:]
+                    k_rot, k_pass = k[..., :self.rotary_dim], k[..., self.rotary_dim:]
+                    q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, sin_v, cos_v)
+                    q = torch.cat((q_rot, q_pass), dim=-1)
+                    k = torch.cat((k_rot, k_pass), dim=-1)
+        
+                if past_kv is not None:
+                    past_k, past_v = past_kv
+        
+                    k = torch.cat([past_k, k], dim=2)
+                    v = torch.cat([past_v, v], dim=2)
+        
+                present_kv = (k, v)
+        
+                scale = 1.0 / math.sqrt(self.head_dim)
+                attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale 
+        
+                if attn_mask is None:
+                    q_len = q.size(2)
+                    k_len = k.size(2)
+                    device = q.device
+                    mask = torch.tril(torch.ones((q_len, k_len), device=device, dtype=torch.bool))
+                    attn_mask = mask.unsqueeze(0).unsqueeze(0) 
+        
+        
+                attn_scores = attn_scores.masked_fill(~attn_mask, float("-inf"))
+                attn_probs = torch.softmax(attn_scores, dim=-1)
+                attn_probs = self.dropout(attn_probs)
+                out = torch.matmul(attn_probs, v)
+                out = out.permute(0, 2, 1, 3).contiguous().view(B, T, -1) 
+                out = self.out_proj(out)
+                return out, present_kv
+        
+        class NeoXMLP(nn.Module):
+            def __init__(self, hidden_size, ff_mult=4, dropout=0.0):
+                super().__init__()
+                inner = hidden_size * ff_mult
+                self.dense_h_to_4h = nn.Linear(hidden_size, inner, bias=True)
+                self.act = nn.GELU()
+                self.dense_4h_to_h = nn.Linear(inner, hidden_size, bias=True)
+                self.dropout = nn.Dropout(dropout)
+        
+            def forward(self, x):
+                x = self.dense_h_to_4h(x)
+                x = self.act(x)
+                x = self.dense_4h_to_h(x)
+                x = self.dropout(x)
+                return x
+        
+        class NeoXLayer(nn.Module):
+            def __init__(self, hidden_size, num_heads, rotary_pct=0.25, ff_mult=4, dropout=0.0):
+                super().__init__()
+                self.input_layernorm = nn.LayerNorm(hidden_size, elementwise_affine=True)
+                self.post_attention_layernorm = nn.LayerNorm(hidden_size, elementwise_affine=True)
+                self.attention = NeoXAttention(hidden_size, num_heads, rotary_pct=rotary_pct, dropout=dropout)
+                self.mlp = NeoXMLP(hidden_size, ff_mult=ff_mult, dropout=dropout)
+        
+            def forward(self, x, sin=None, cos=None, attn_mask=None, past_kv=None):
+                norm_x = self.input_layernorm(x)
+                attn_out, present_kv = self.attention(norm_x, sin=sin, cos=cos, attn_mask=attn_mask, past_kv=past_kv)
+                ff_out = self.mlp(norm_x)
+                x = x + attn_out + ff_out
+                return x, present_kv
+        
+        class GPTNeoXForCausalLM(nn.Module):
+            def __init__(self, cfg: Dict[str, Any]):
+                super().__init__()
+                vocab_size = cfg["vocab_size"]
+                hidden_size = cfg["hidden_size"]
+                num_layers = cfg["num_layers"]
+                num_heads = cfg["num_heads"]
+                ff_mult = cfg.get("ff_mult", 4)
+                rotary_pct = cfg.get("rotary_pct", 0.25)
+                max_seq_len = cfg.get("max_seq_len", 512)
+                dropout = cfg.get("dropout", 0.0)
+                tie_word_embeddings = cfg.get("tie_word_embeddings", True)
+        
+                self.embed_in = nn.Embedding(vocab_size, hidden_size)
+                self.layers = nn.ModuleList([
+                    NeoXLayer(hidden_size, num_heads, rotary_pct=rotary_pct, ff_mult=ff_mult, dropout=dropout)
+                    for _ in range(num_layers)
+                ])
+                self.final_layer_norm = nn.LayerNorm(hidden_size, elementwise_affine=True)
+                self.embed_out = nn.Linear(hidden_size, vocab_size, bias=False)
+        
+                if tie_word_embeddings:
+                    self.embed_out.weight = self.embed_in.weight
+        
+                rotary_dim = int((hidden_size // num_heads) * rotary_pct)
+                if rotary_dim > 0:
+                    sin, cos = make_rotary_sin_cos(max_seq_len, rotary_dim, device=torch.device("cpu"), dtype=torch.float32)
+                    self.register_buffer("sin_cache", sin)
+                    self.register_buffer("cos_cache", cos)
+                else:
+                    self.sin_cache = None
+                    self.cos_cache = None
+        
+            def forward(self, input_ids, past_kvs=None):
+                B, T = input_ids.shape
+                x = self.embed_in(input_ids)
+                past_len = 0
+                if past_kvs is not None:
+                    past_len = past_kvs[0][0].size(2)
+        
+                if getattr(self, "sin_cache", None) is not None:
+                    sin = self.sin_cache[past_len: past_len + T].to(x.device).to(x.dtype)
+                    cos = self.cos_cache[past_len: past_len + T].to(x.device).to(x.dtype)
+                else:
+                    sin = cos = None
+        
+                new_kvs = []
+                attn_mask = None
+                for i, layer in enumerate(self.layers):
+                    past_kv = past_kvs[i] if past_kvs is not None else None
+                    x, present_kv = layer(x, sin=sin, cos=cos, attn_mask=attn_mask, past_kv=past_kv)
+                    new_kvs.append(present_kv)
+        
+                x = self.final_layer_norm(x)
+                logits = self.embed_out(x)
+                return logits, new_kvs
+        
+        class Gemma3Model(GPTNeoXForCausalLM):
+            def forward(self, input_ids, labels=None, past_kvs=None):
+                logits, new_kvs = super().forward(input_ids, past_kvs=past_kvs)
+                loss = None
+                if labels is not None:
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+                    loss = F.cross_entropy(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                        ignore_index=-100,
+                    )
+                return logits, loss
+        '''
+
+        def write_text(path, text):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        def write_json(path, obj):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2)
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--tokenizer_json", required=True)
+            ap.add_argument("--num_layers", type=int, required=True)
+            ap.add_argument("--model_weights", required=True)
+            ap.add_argument("--model_config", required=True)
+            ap.add_argument("--model_py", required=True)
+            args = ap.parse_args()
+
+            # === Setup ===
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model_dtype = torch.float16 if device == "cuda" else torch.float32
+            print(f"[INFO] Using device: {device} ({torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'})")
+
+            # === Load tokenizer ===
+            if not os.path.exists(args.tokenizer_json):
+                print(f"[ERROR] Tokenizer not found: {args.tokenizer_json}")
+                sys.exit(1)
+            tok = Tokenizer.from_file(args.tokenizer_json)
+            vocab_size = tok.get_vocab_size()
+
+
+
+            cfg = {
+            "vocab_size": vocab_size,
+            "hidden_size": 512,
+            "num_heads": 8,
+            "num_layers": args.num_layers,
+            "ff_mult": 250,
+            "rotary_pct": 0.25,
+            "max_seq_len": 3500,
+            "context_length": 3500,
+            "dropout": 0.2,
+            "tie_word_embeddings": True,
+            "dtype": "float16" if model_dtype == torch.float16 else "float32",
+        }
+
+            # === Write config & model ===
+            write_json(os.path.abspath(args.model_config), cfg)
+            write_text(os.path.abspath(args.model_py), MODEL_PY)
+
+            tmp_model_path = "/tmp/tinygpt_neox_model.py"
+            write_text(tmp_model_path, MODEL_PY)
+
+            # === Import model dynamically ===
+            spec = importlib.util.spec_from_file_location("tinygpt_neox_model", tmp_model_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            # === Build model ===
+            model = mod.GPTNeoXForCausalLM(cfg).to(device)
+
+            def neox_init_weights(model: nn.Module, num_layers: int, hidden_size: int):
+                small_std = math.sqrt(2.0 / (5.0 * float(hidden_size)))
+                wang_std = 2.0 / (float(num_layers) * math.sqrt(float(hidden_size)))
+                for name, module in model.named_modules():
+                    if isinstance(module, nn.Linear):
+                        if "dense_4h_to_h" in name or name.endswith("dense_4h_to_h"):
+                            nn.init.normal_(module.weight, mean=0.0, std=wang_std)
+                            if module.bias is not None:
+                                nn.init.zeros_(module.bias)
+                        else:
+                            nn.init.normal_(module.weight, mean=0.0, std=small_std)
+                            if module.bias is not None:
+                                nn.init.zeros_(module.bias)
+            neox_init_weights(model, cfg["num_layers"], cfg["hidden_size"])
+            if model_dtype == torch.float16:
+                model.half()
+
+            if getattr(model, "sin_cache", None) is not None:
+                model.sin_cache = model.sin_cache.to(device).to(next(model.parameters()).dtype)
+                model.cos_cache = model.cos_cache.to(device).to(next(model.parameters()).dtype)
+    
+            print("[INFO] Model initialized.")
+            model.eval()
+            summary(model, input_data=torch.randint(0, cfg["vocab_size"], (1, 32)).to(device))
+
+            # === Save weights ===
+            out_w_abs = os.path.abspath(args.model_weights)
+            os.makedirs(os.path.dirname(out_w_abs), exist_ok=True)
+            torch.save(model.state_dict(), out_w_abs)
+
+            total = sum(p.numel() for p in model.parameters())
+            print(f"[INFO] Weights saved to {out_w_abs}")
+            print(f"[INFO] Total parameters: {total:,}")
+            print("[INFO] Done.")
+
+        if __name__ == "__main__":
+            main()
+
+    args:
+      - --tokenizer_json
+      - {inputPath: tokenizer_json}
+      - --num_layers
+      - {inputValue: num_layers}
+      - --model_weights
+      - {outputPath: model_weights}
+      - --model_config
+      - {outputPath: model_config}
+      - --model_py
+      - {outputPath: model_py}
