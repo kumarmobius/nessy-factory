@@ -1,7 +1,8 @@
 name: HFConvertor
-description: |
+description: >
   Convert a GPT-NeoX checkpoint + tokenizer/config into a Hugging Face model folder.
   Uses named argparse flags. Core conversion logic is preserved from your uploaded script.
+
 inputs:
   - name: tokenizer_json
     type: Model
@@ -37,7 +38,7 @@ implementation:
       - bash
       - -lc
       - |
-        cat > /tmp/convert_to_hf.py <<'PY'
+        cat > /tmp/convert_to_hf.py <<'EOF'
         #!/usr/bin/env python3
         import argparse, os, re, json, shutil, torch
         from collections import OrderedDict
@@ -196,7 +197,7 @@ implementation:
 
         print("[CONVERT] Conversion completed successfully.")
         print("[CONVERT] Artifact available at:", OUT_CONVERTED)
-        PY
+        EOF
         python3 -u /tmp/convert_to_hf.py "$@"
     args:
       - --src_pt
