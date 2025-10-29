@@ -1,5 +1,5 @@
-name: Run Gemma3 Inference (Generation Only)
-description: Generate text with Gemma3Model for a list of prompts; write JSON to a file output
+name: LM_Inference
+description: Loads Gemma3Model and generates text for a list of prompts (no scoring)
 inputs:
   - name: tokenizer_json
     type: Model
@@ -15,7 +15,7 @@ inputs:
     description: Path to learned model weights file
   - name: prompts_json
     type: String
-    description: JSON string with a list of prompt strings
+    description: JSON string containing a list of prompt strings
   - name: max_new_tokens
     type: Integer
     default: "64"
@@ -27,11 +27,11 @@ inputs:
   - name: top_k
     type: Integer
     default: "50"
-    description: Sample only from top-k tokens; set 0 to disable
+    description: Sample only from top-k tokens
 outputs:
   - name: generations_json
-    type: Data
-    description: File containing the JSON string of prompts and generated outputs
+    type: String
+    description: JSON file with prompts and generated outputs
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
@@ -65,6 +65,8 @@ implementation:
                 import shutil
                 shutil.copyfile(py_path, tmp)
                 py_path = tmp
+            if not os.path.exists(py_path):
+                raise FileNotFoundError(f"Model file not found: {py_path}")
             spec = importlib.util.spec_from_file_location(mod_name, py_path)
             if spec is None or spec.loader is None:
                 raise ImportError(f"Cannot load module from: {py_path}")
@@ -90,6 +92,8 @@ implementation:
         parser.add_argument("--top_k", type=int, default=50)
         parser.add_argument("--generations_json", type=str, required=True)
         args = parser.parse_args()
+
+        os.makedirs(os.path.dirname(args.generations_json) or ".", exist_ok=True)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_device = torch.device(device)
@@ -126,16 +130,21 @@ implementation:
             for _ in range(steps):
                 with torch.no_grad():
                     logits = model(x)[0][0, -1]
+
                 logits = logits / temp
-                if top_k and top_k > 0:
+
+                if top_k is not None and top_k > 0:
                     k = min(int(top_k), logits.shape[0])
                     thresh = torch.topk(logits, k).values[-1]
                     logits[logits < thresh] = -float("inf")
+
                 probs = F.softmax(logits, dim=-1)
                 next_id = torch.multinomial(probs, 1).item()
                 ids.append(next_id)
+
                 if eos_id is not None and next_id == eos_id:
                     break
+
                 if len(ids) > context_len:
                     ids = ids[-context_len:]
                 x = torch.tensor([ids], dtype=torch.long, device=torch_device)
@@ -145,27 +154,30 @@ implementation:
 
         raw = json.loads(args.prompts_json)
         prompts = raw if isinstance(raw, list) else [str(raw)]
-        results = [{"prompt": p, "output": generate_text(p, args.max_new_tokens, args.temperature, args.top_k)} for p in prompts]
+        results = []
+        for p in prompts:
+            out = generate_text(p, args.max_new_tokens, args.temperature, args.top_k)
+            results.append({"prompt": p, "output": out})
 
-        os.makedirs(os.path.dirname(args.generations_json) or ".", exist_ok=True)
         with open(args.generations_json, "w", encoding="utf-8") as f:
-            f.write(json.dumps(results, ensure_ascii=False))
-    args:
-      - --tokenizer_json
-      - {inputPath: tokenizer_json}
-      - --model_py
-      - {inputPath: model_py}
-      - --model_config
-      - {inputPath: model_config}
-      - --learned_weights
-      - {inputPath: learned_weights}
-      - --prompts_json
-      - {inputValue: prompts_json}
-      - --max_new_tokens
-      - {inputValue: max_new_tokens}
-      - --temperature
-      - {inputValue: temperature}
-      - --top_k
-      - {inputValue: top_k}
-      - --generations_json
-      - {outputPath: generations_json}
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
+args:
+  - --tokenizer_json
+  - {inputPath: tokenizer_json}
+  - --model_py
+  - {inputPath: model_py}
+  - --model_config
+  - {inputPath: model_config}
+  - --learned_weights
+  - {inputPath: learned_weights}
+  - --prompts_json
+  - {inputValue: prompts_json}
+  - --max_new_tokens
+  - {inputValue: max_new_tokens}
+  - --temperature
+  - {inputValue: temperature}
+  - --top_k
+  - {inputValue: top_k}
+  - --generations_json
+  - {outputPath: generations_json}
