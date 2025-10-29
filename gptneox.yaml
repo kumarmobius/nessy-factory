@@ -25,18 +25,20 @@ implementation:
         import subprocess, sys, os, json, argparse, importlib.util
         from typing import Dict, Any
 
-        # === Install dependencies ===
         subprocess.run(
           [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
            "torch", "tokenizers", "torchinfo", "numpy"],
           check=True
         )
 
-        from torchinfo import summary
+        import math
         import torch
+        import torch.nn as nn
+        from torchinfo import summary
         from tokenizers import Tokenizer
+        from typing import Any, Dict
 
-        # === embedded model source (written to model_py) ===
+
         MODEL_PY = '''
         import math
         import torch
