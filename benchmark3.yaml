@@ -329,7 +329,7 @@ implementation:
                     if emissions_val is not None:
                         ef.write(str(emissions_val) + "\n")
                     else:
-                        ef.write("\\n")
+                        ef.write("\n")
             except Exception as e:
                 log("Failed to write emissions CSV: " + str(e))
 
