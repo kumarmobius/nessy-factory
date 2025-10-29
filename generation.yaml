@@ -92,8 +92,7 @@ implementation:
         parser.add_argument(
             "--test_data_json",
             type=str,
-            required=True,
-            help="""Either a JSON string like '["a","b"]' OR a path to a .json file"""
+            required=True
         )
         parser.add_argument("--max_new_tokens", type=int, default=64)
         parser.add_argument("--temperature", type=float, default=1.0)
@@ -170,7 +169,6 @@ implementation:
             dec_ids = ids[1:] if (bos_id is not None and len(ids) and ids[0] == bos_id) else ids
             return tok.decode(dec_ids)
 
-        # -------- Robust test_data_json loading --------
         td = args.test_data_json
         print(f"[DEBUG] Raw test_data_json length={len(td)}; preview (first 1000 chars):")
         print(td[:1000])
