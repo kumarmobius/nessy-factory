@@ -276,7 +276,7 @@ implementation:
             "hidden_size": 512,
             "num_heads": 8,
             "num_layers": args.num_layers,
-            "ff_mult": 250,
+            "ff_mult": 4,
             "rotary_pct": 0.25,
             "max_seq_len": 3500,
             "context_length": 3500,
