@@ -1,4 +1,4 @@
-name: Run Inferencing
+name: Run Inference
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
   Accepts test_data_json as either (A) a JSON string (one-line) or (B) a path to a JSON file.
@@ -17,7 +17,7 @@ inputs:
     description: Path to learned model weights file
   - name: test_data_json
     type: String
-    description: JSON array string (one-line) OR a path to a JSON file containing the array of prompts
+    description: JSON array string (one-line) OR a path to a JSON file containing the array of prompts or [prompt, ground_truth] pairs
   - name: max_new_tokens
     type: Integer
     default: "64"
@@ -33,7 +33,7 @@ inputs:
 outputs:
   - name: inference_results
     type: String
-    description: JSON file with generation results (list of {inference_input, inference_output})
+    description: JSON file with generation results (list of {inference_input, ground_truth, inference_output})
 implementation:
   container:
     image: nikhilv215/nesy-factory:v22
@@ -42,28 +42,38 @@ implementation:
       - -c
       - |
         set -e
-        # install runtime deps needed for generation (no rouge/sacrebleu)
+        # Install runtime deps needed for generation (no rouge/sacrebleu)
         pip install tokenizers torch || true
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
-        import argparse, importlib.util, json, os, sys, shutil
-        import torch
-        from tokenizers import Tokenizer
-        import torch.nn.functional as F
+
+        # Write the Python script to a file via a here-doc to avoid YAML quoting issues
+        cat > /tmp/infer.py <<'PY'
+        #!/usr/bin/env python3
+        import argparse
+        import importlib.util
+        import json
+        import os
+        import sys
+        import shutil
+        import traceback
+
+        try:
+            import torch
+            import torch.nn.functional as F
+            from tokenizers import Tokenizer
+        except Exception as e:
+            sys.stderr.write("ERROR: required Python packages are missing: " + str(e) + "\n")
+            sys.exit(2)
 
         def find_model_py_file(path_or_dir):
             if os.path.isfile(path_or_dir):
                 return path_or_dir
             if not os.path.isdir(path_or_dir):
-                raise ValueError("model_py must be a file or a directory containing one .py file")
+                raise ValueError("model_py must be a file or a directory containing one .py file: " + str(path_or_dir))
             py_files = [os.path.join(path_or_dir, f) for f in os.listdir(path_or_dir) if f.endswith(".py")]
             if not py_files:
-                raise FileNotFoundError("No .py files found in directory: " + path_or_dir)
+                raise FileNotFoundError("No .py file found in directory: " + path_or_dir)
             if len(py_files) > 1:
-                # fallback to first but inform user
+                # choose first but warn
                 sys.stderr.write("WARNING: multiple .py files found in model_py directory; using first: " + py_files[0] + "\n")
             return py_files[0]
 
@@ -81,35 +91,8 @@ implementation:
             spec.loader.exec_module(module)
             return module
 
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--tokenizer_json", type=str, required=True)
-        parser.add_argument("--model_py", type=str, required=True)
-        parser.add_argument("--model_config", type=str, required=True)
-        parser.add_argument("--learned_weights", type=str, required=True)
-        parser.add_argument("--test_data_json", type=str, required=True)
-        parser.add_argument("--max_new_tokens", type=int, default=64)
-        parser.add_argument("--temperature", type=float, default=1.0)
-        parser.add_argument("--top_k", type=int, default=50)
-        parser.add_argument("--inference_results", type=str, required=True)
-        args = parser.parse_args()
-
-        # ensure output dir exists
-        out_dir = os.path.dirname(args.inference_results) or "."
-        os.makedirs(out_dir, exist_ok=True)
-
-        # device + dtype
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        torch_device = torch.device(device)
-        model_dtype = torch.float16 if device == "cuda" else torch.float32
-
-        # load tokenizer
-        try:
-            tok = Tokenizer.from_file(args.tokenizer_json)
-        except Exception as e:
-            sys.stderr.write("ERROR: Failed to load tokenizer: " + str(e) + "\n")
-            sys.exit(3)
-
         def token_id_any(tok_obj, candidates):
+            # tokenizers.Tokenizer: token_to_id may raise; be defensive
             for c in candidates:
                 try:
                     tid = tok_obj.token_to_id(c)
@@ -119,55 +102,32 @@ implementation:
                     return tid
             return None
 
-        bos_id = token_id_any(tok, ["<s>", "<bos>"])
-        eos_id = token_id_any(tok, ["</s>", "<eos>"])
-
-        # load model config (keep dtype as portable string)
-        try:
-            with open(args.model_config, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception as e:
-            sys.stderr.write("ERROR: Failed to read model_config: " + str(e) + "\n")
-            sys.exit(4)
-        cfg["dtype"] = "float16" if model_dtype == torch.float16 else "float32"
-
-        # load model code
-        try:
-            model_py_path = find_model_py_file(args.model_py)
-            mod = load_module_from_path(model_py_path, "gemma3_model")
-            Gemma3Model = getattr(mod, "Gemma3Model")
-        except Exception as e:
-            sys.stderr.write("ERROR: Failed to load model code: " + str(e) + "\n")
-            sys.exit(5)
-
-        # instantiate and load weights
-        try:
-            model = Gemma3Model(cfg).to(torch_device)
-            state = torch.load(args.learned_weights, map_location=torch_device)
-            model.load_state_dict(state, strict=True)
-            model.eval()
-        except Exception as e:
-            sys.stderr.write("ERROR: Failed to instantiate/load model: " + str(e) + "\n")
-            sys.exit(6)
-
-        context_len = int(cfg.get("context_length", 2048))
-
-        def generate_text(prompt, max_new_tokens=64, temperature=1.0, top_k=50):
+        def generate_text_from_model(model, tok, prompt, bos_id, eos_id, context_len, torch_device, max_new_tokens=64, temperature=1.0, top_k=50):
             ids = tok.encode(prompt).ids
             if bos_id is not None:
                 ids = [bos_id] + ids
             x = torch.tensor([ids], dtype=torch.long, device=torch_device)
             for _ in range(max_new_tokens):
                 with torch.no_grad():
-                    model_output = model(x)[0]
+                    out = model(x)
+                    # handle models that return (logits, ...) or logits directly; pick first element if tuple/list
+                    if isinstance(out, (tuple, list)):
+                        model_output = out[0]
+                    else:
+                        model_output = out
                     logits = model_output[0, -1]
-                logits = logits / (temperature if temperature > 0 else 1.0)
+                # temperature scaling (avoid zero divide)
+                logits = logits / (temperature if temperature and temperature > 0 else 1.0)
                 if top_k is not None and top_k > 0:
                     kth = torch.topk(logits, min(top_k, logits.shape[-1])).values[-1]
                     indices_to_remove = logits < kth
                     logits[indices_to_remove] = -float("Inf")
                 probs = F.softmax(logits, dim=-1)
-                next_id = torch.multinomial(probs, 1).item()
+                try:
+                    next_id = torch.multinomial(probs, 1).item()
+                except Exception:
+                    # fallback: choose argmax deterministically if sampling fails
+                    next_id = int(torch.argmax(probs).item())
                 ids.append(next_id)
                 if eos_id is not None and next_id == eos_id:
                     break
@@ -178,61 +138,149 @@ implementation:
             try:
                 return tok.decode(dec_ids)
             except Exception:
+                # fallback: return space-joined ids
                 return " ".join(str(i) for i in dec_ids)
 
-        # load test_data_json (either a file path or JSON string)
-        td = args.test_data_json
-        test_data = None
-        if os.path.exists(td) and os.path.isfile(td):
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--tokenizer_json", type=str, required=True)
+            parser.add_argument("--model_py", type=str, required=True)
+            parser.add_argument("--model_config", type=str, required=True)
+            parser.add_argument("--learned_weights", type=str, required=True)
+            parser.add_argument("--test_data_json", type=str, required=True)
+            parser.add_argument("--max_new_tokens", type=int, default=64)
+            parser.add_argument("--temperature", type=float, default=1.0)
+            parser.add_argument("--top_k", type=int, default=50)
+            parser.add_argument("--inference_results", type=str, required=True)
+            args = parser.parse_args()
+
+            # ensure output dir exists
+            out_dir = os.path.dirname(args.inference_results) or "."
+            os.makedirs(out_dir, exist_ok=True)
+
+            # device + dtype
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            torch_device = torch.device(device)
+            model_dtype = torch.float16 if device == "cuda" else torch.float32
+
+            # load tokenizer
             try:
-                with open(td, "r", encoding="utf-8") as fh:
-                    test_data = json.load(fh)
+                tok = Tokenizer.from_file(args.tokenizer_json)
             except Exception as e:
-                sys.stderr.write("ERROR: Failed to parse JSON file for test_data_json: " + str(e) + "\n")
-                sys.exit(7)
-        else:
-            try:
-                test_data = json.loads(td)
-            except json.JSONDecodeError:
-                sample = repr(td[:1000])
-                sys.stderr.write("ERROR: Invalid JSON passed to --test_data_json. Preview: " + sample + "\n")
-                sys.exit(8)
+                sys.stderr.write("ERROR: Failed to load tokenizer: " + str(e) + "\n")
+                sys.exit(3)
 
-        if not isinstance(test_data, list):
-            sys.stderr.write("ERROR: test_data must be a JSON list of [input, expected_output] pairs.\n")
-            sys.exit(9)
+            bos_id = token_id_any(tok, ["<s>", "<bos>"])
+            eos_id = token_id_any(tok, ["</s>", "<eos>"])
 
-        results = []
-        for idx, pair in enumerate(test_data):
-            # expect each item to be a 2-element sequence: [input_text, expected_output]
+            # load model config
             try:
-                input_text, expected_output = pair
-            except Exception:
-                sys.stderr.write(f"ERROR: test_data element at index {idx} is not a 2-element pair: {pair}\n")
-                input_text = str(pair)
-                expected_output = ""
-            try:
-                generated_output = generate_text(input_text, args.max_new_tokens, args.temperature, args.top_k)
+                with open(args.model_config, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
             except Exception as e:
-                generated_output = "[ERROR during generation: " + str(e) + "]"
+                sys.stderr.write("ERROR: Failed to read model_config: " + str(e) + "\n")
+                sys.exit(4)
+            # keep dtype as a string value for portability
+            cfg["dtype"] = "float16" if model_dtype == torch.float16 else "float32"
 
-            result = {
-                "inference_input": input_text,
-                "ground_truth": expected_output,
-                "inference_output": generated_output
-            }
-            results.append(result)
+            # load model code
+            try:
+                model_py_path = find_model_py_file(args.model_py)
+                mod = load_module_from_path(model_py_path, "gemma3_model")
+                Gemma3Model = getattr(mod, "Gemma3Model")
+            except Exception as e:
+                sys.stderr.write("ERROR: Failed to load model code: " + str(e) + "\n")
+                traceback.print_exc(file=sys.stderr)
+                sys.exit(5)
 
-            # short runtime log
-            print(f"[{idx}] Generated (preview): {generated_output[:200].replace(chr(10),' ')}")
+            # instantiate and load weights
+            try:
+                model = Gemma3Model(cfg).to(torch_device)
+                state = torch.load(args.learned_weights, map_location=torch_device)
+                model.load_state_dict(state, strict=True)
+                model.eval()
+            except Exception as e:
+                sys.stderr.write("ERROR: Failed to instantiate/load model: " + str(e) + "\n")
+                traceback.print_exc(file=sys.stderr)
+                sys.exit(6)
 
-        # write results (contains ground_truth but no scores)
-        try:
-            with open(args.inference_results, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            sys.stderr.write("ERROR: Failed to write inference_results: " + str(e) + "\n")
-            sys.exit(10)
+            context_len = int(cfg.get("context_length", 2048))
+
+            # load test_data_json (either a file path or JSON string)
+            td = args.test_data_json
+            test_data = None
+            if os.path.exists(td) and os.path.isfile(td):
+                try:
+                    with open(td, "r", encoding="utf-8") as fh:
+                        test_data = json.load(fh)
+                except Exception as e:
+                    sys.stderr.write("ERROR: Failed to parse JSON file for test_data_json: " + str(e) + "\n")
+                    sys.exit(7)
+            else:
+                try:
+                    test_data = json.loads(td)
+                except Exception as e:
+                    sample = repr(td[:1000])
+                    sys.stderr.write("ERROR: Invalid JSON passed to --test_data_json. Preview: " + sample + "\n")
+                    sys.exit(8)
+
+            if not isinstance(test_data, list):
+                sys.stderr.write("ERROR: test_data must be a JSON list (either list of strings or list of 2-element pairs).\n")
+                sys.exit(9)
+
+            results = []
+            for idx, item in enumerate(test_data):
+                # support either:
+                #  - "prompt" (string)
+                #  - ["prompt", "ground_truth"]
+                if isinstance(item, str):
+                    input_text = item
+                    expected_output = ""
+                else:
+                    try:
+                        input_text, expected_output = item
+                        if not isinstance(input_text, str):
+                            input_text = str(input_text)
+                        if not isinstance(expected_output, str):
+                            expected_output = str(expected_output)
+                    except Exception:
+                        # fallback: stringify whole item
+                        input_text = str(item)
+                        expected_output = ""
+
+                try:
+                    generated_output = generate_text_from_model(
+                        model, tok, input_text, bos_id, eos_id, context_len, torch_device,
+                        max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_k=args.top_k
+                    )
+                except Exception as e:
+                    generated_output = "[ERROR during generation: " + str(e) + "]"
+                    traceback.print_exc(file=sys.stderr)
+
+                result = {
+                    "inference_input": input_text,
+                    "ground_truth": expected_output,
+                    "inference_output": generated_output
+                }
+                results.append(result)
+                # short runtime log for visibility
+                preview = (generated_output[:200].replace("\n", " ") if isinstance(generated_output, str) else str(generated_output))
+                print(f"[{idx}] Generated preview: {preview}")
+
+            # write results
+            try:
+                with open(args.inference_results, "w", encoding="utf-8") as f:
+                    json.dump(results, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                sys.stderr.write("ERROR: Failed to write inference_results: " + str(e) + "\n")
+                sys.exit(10)
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        # Execute the script with the same args provided by kfp (exec replaces the shell process)
+        exec python3 /tmp/infer.py "$@"
     args:
       - --tokenizer_json
       - {inputPath: tokenizer_json}
