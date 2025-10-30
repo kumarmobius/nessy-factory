@@ -1,4 +1,4 @@
-name: Run Inference
+name: Run Inferencing
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
   Accepts test_data_json as either (A) a JSON string (one-line) or (B) a path to a JSON file.
@@ -39,15 +39,10 @@ implementation:
     image: nikhilv215/nesy-factory:v22
     command:
       - sh
-      - -c
+      - -ec
       - |
-        set -e
-        # Install runtime deps needed for generation (no rouge/sacrebleu)
         pip install tokenizers torch || true
-
-        # Write the Python script to a file via a here-doc to avoid YAML quoting issues
-        cat > /tmp/infer.py <<'PY'
-        #!/usr/bin/env python3
+        python3 -u - "$@" << 'EOF_PYTHON_SCRIPT'
         import argparse
         import importlib.util
         import json
@@ -73,7 +68,6 @@ implementation:
             if not py_files:
                 raise FileNotFoundError("No .py file found in directory: " + path_or_dir)
             if len(py_files) > 1:
-                # choose first but warn
                 sys.stderr.write("WARNING: multiple .py files found in model_py directory; using first: " + py_files[0] + "\n")
             return py_files[0]
 
@@ -92,7 +86,6 @@ implementation:
             return module
 
         def token_id_any(tok_obj, candidates):
-            # tokenizers.Tokenizer: token_to_id may raise; be defensive
             for c in candidates:
                 try:
                     tid = tok_obj.token_to_id(c)
@@ -110,13 +103,11 @@ implementation:
             for _ in range(max_new_tokens):
                 with torch.no_grad():
                     out = model(x)
-                    # handle models that return (logits, ...) or logits directly; pick first element if tuple/list
                     if isinstance(out, (tuple, list)):
                         model_output = out[0]
                     else:
                         model_output = out
                     logits = model_output[0, -1]
-                # temperature scaling (avoid zero divide)
                 logits = logits / (temperature if temperature and temperature > 0 else 1.0)
                 if top_k is not None and top_k > 0:
                     kth = torch.topk(logits, min(top_k, logits.shape[-1])).values[-1]
@@ -126,7 +117,6 @@ implementation:
                 try:
                     next_id = torch.multinomial(probs, 1).item()
                 except Exception:
-                    # fallback: choose argmax deterministically if sampling fails
                     next_id = int(torch.argmax(probs).item())
                 ids.append(next_id)
                 if eos_id is not None and next_id == eos_id:
@@ -138,7 +128,6 @@ implementation:
             try:
                 return tok.decode(dec_ids)
             except Exception:
-                # fallback: return space-joined ids
                 return " ".join(str(i) for i in dec_ids)
 
         def main():
@@ -154,16 +143,13 @@ implementation:
             parser.add_argument("--inference_results", type=str, required=True)
             args = parser.parse_args()
 
-            # ensure output dir exists
             out_dir = os.path.dirname(args.inference_results) or "."
             os.makedirs(out_dir, exist_ok=True)
 
-            # device + dtype
             device = "cuda" if torch.cuda.is_available() else "cpu"
             torch_device = torch.device(device)
             model_dtype = torch.float16 if device == "cuda" else torch.float32
 
-            # load tokenizer
             try:
                 tok = Tokenizer.from_file(args.tokenizer_json)
             except Exception as e:
@@ -173,17 +159,14 @@ implementation:
             bos_id = token_id_any(tok, ["<s>", "<bos>"])
             eos_id = token_id_any(tok, ["</s>", "<eos>"])
 
-            # load model config
             try:
                 with open(args.model_config, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
             except Exception as e:
                 sys.stderr.write("ERROR: Failed to read model_config: " + str(e) + "\n")
                 sys.exit(4)
-            # keep dtype as a string value for portability
             cfg["dtype"] = "float16" if model_dtype == torch.float16 else "float32"
 
-            # load model code
             try:
                 model_py_path = find_model_py_file(args.model_py)
                 mod = load_module_from_path(model_py_path, "gemma3_model")
@@ -193,7 +176,6 @@ implementation:
                 traceback.print_exc(file=sys.stderr)
                 sys.exit(5)
 
-            # instantiate and load weights
             try:
                 model = Gemma3Model(cfg).to(torch_device)
                 state = torch.load(args.learned_weights, map_location=torch_device)
@@ -206,7 +188,6 @@ implementation:
 
             context_len = int(cfg.get("context_length", 2048))
 
-            # load test_data_json (either a file path or JSON string)
             td = args.test_data_json
             test_data = None
             if os.path.exists(td) and os.path.isfile(td):
@@ -230,9 +211,6 @@ implementation:
 
             results = []
             for idx, item in enumerate(test_data):
-                # support either:
-                #  - "prompt" (string)
-                #  - ["prompt", "ground_truth"]
                 if isinstance(item, str):
                     input_text = item
                     expected_output = ""
@@ -244,7 +222,6 @@ implementation:
                         if not isinstance(expected_output, str):
                             expected_output = str(expected_output)
                     except Exception:
-                        # fallback: stringify whole item
                         input_text = str(item)
                         expected_output = ""
 
@@ -263,11 +240,9 @@ implementation:
                     "inference_output": generated_output
                 }
                 results.append(result)
-                # short runtime log for visibility
                 preview = (generated_output[:200].replace("\n", " ") if isinstance(generated_output, str) else str(generated_output))
-                print(f"[{idx}] Generated preview: {preview}")
+                print("Generated [" + str(idx) + "]: " + preview)
 
-            # write results
             try:
                 with open(args.inference_results, "w", encoding="utf-8") as f:
                     json.dump(results, f, indent=2, ensure_ascii=False)
@@ -277,10 +252,7 @@ implementation:
 
         if __name__ == "__main__":
             main()
-        PY
-
-        # Execute the script with the same args provided by kfp (exec replaces the shell process)
-        exec python3 /tmp/infer.py "$@"
+        EOF_PYTHON_SCRIPT
     args:
       - --tokenizer_json
       - {inputPath: tokenizer_json}
