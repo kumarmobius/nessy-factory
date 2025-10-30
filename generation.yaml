@@ -184,15 +184,12 @@ implementation:
         else:
             try:
                 test_data = json.loads(td)
-            except json.JSONDecodeError as e:
-                print("[ERROR] json.loads failed on --test_data_json string.")
-                print(f"[ERROR] json.decoder message: {e.msg} (pos {e.pos})")
-                sample = repr(td[:2000])
-                print(f"[ERROR] test_data_json repr preview (truncated): {sample}")
-                print("[ERROR] Invalid JSON passed to --test_data_json. Either pass a valid JSON string "
-                      "(e.g. '[\"a\",\"b\"]') or pass a path to a .json file containing the list.")
+            except json.JSONDecodeError:
+                # exit with an error code and single-line message to stderr (no prints)
                 import sys
+                sys.stderr.write("Invalid JSON passed to --test_data_json. Pass a JSON list string or a path to a .json file.\n")
                 sys.exit(2)
+
 
 
         if not isinstance(test_data, list):
