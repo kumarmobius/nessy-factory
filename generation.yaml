@@ -1,4 +1,4 @@
-name: Run Inference
+name: Run Inferencing
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
   Accepts test_data_json as either (A) a JSON string (one-line) or (B) a path to a JSON file.
@@ -47,22 +47,18 @@ implementation:
       - python3
       - -u
       - -c
-      - |
-        import argparse, importlib.util, json, os, sys, shutil
-        import torch
-        from tokenizers import Tokenizer
-        import torch.nn.functional as F
-
+      - >-
+        import argparse, importlib.util, json, os, sys, shutil;
+        import torch;
+        from tokenizers import Tokenizer;
+        import torch.nn.functional as F;
+        
         def find_model_py_file(path_or_dir):
-            # returns a single .py file path (if argument is a file, returns it)
             if os.path.isfile(path_or_dir):
                 return path_or_dir
             if not os.path.isdir(path_or_dir):
                 raise ValueError("model_py must be a file or a directory containing one .py file")
             py_files = [os.path.join(path_or_dir, f) for f in os.listdir(path_or_dir) if f.endswith(".py")]
-            if not py_files:
-                raise FileNotFoundError("No .py file found in directory: " + path_or_dir)
-            return py_files[0]
 
         def load_module_from_path(py_path, mod_name="gemma3_model"):
             if not py_path.endswith(".py"):
