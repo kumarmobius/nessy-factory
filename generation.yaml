@@ -1,4 +1,4 @@
-name: Run Inferencing
+name: Run Inference
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
   Accepts test_data_json as either (A) a JSON string (one-line) or (B) a path to a JSON file.
@@ -43,22 +43,27 @@ implementation:
       - |
         set -e
         pip install tokenizers torch || true
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - >-
-        import argparse, importlib.util, json, os, sys, shutil;
-        import torch;
-        from tokenizers import Tokenizer;
-        import torch.nn.functional as F;
-        
+
+        # write the python script to a file using a single-quoted here-doc (avoids quoting issues)
+        cat > /tmp/infer.py <<'PY'
+        #!/usr/bin/env python3
+        import argparse, importlib.util, json, os, sys, shutil
+        import torch
+        from tokenizers import Tokenizer
+        import torch.nn.functional as F
+
         def find_model_py_file(path_or_dir):
             if os.path.isfile(path_or_dir):
                 return path_or_dir
             if not os.path.isdir(path_or_dir):
                 raise ValueError("model_py must be a file or a directory containing one .py file")
             py_files = [os.path.join(path_or_dir, f) for f in os.listdir(path_or_dir) if f.endswith(".py")]
+            if not py_files:
+                raise ValueError("No .py files found in directory: " + path_or_dir)
+            if len(py_files) > 1:
+                # be explicit so the user knows what's wrong
+                raise ValueError("Multiple .py files found in directory: " + path_or_dir + " — expected exactly one.")
+            return py_files[0]
 
         def load_module_from_path(py_path, mod_name="gemma3_model"):
             if not py_path.endswith(".py"):
@@ -173,7 +178,6 @@ implementation:
             try:
                 return tok.decode(dec_ids)
             except Exception:
-                # fallback: map ids to strings if tokenizer decode fails
                 return " ".join(str(i) for i in dec_ids)
 
         # load test_data_json (either a file path or JSON string)
@@ -190,7 +194,6 @@ implementation:
             try:
                 test_data = json.loads(td)
             except json.JSONDecodeError:
-                # write a short diagnostic (single-line) and exit
                 sample = repr(td[:1000])
                 sys.stderr.write("ERROR: Invalid JSON passed to --test_data_json. Preview: " + sample + "\n")
                 sys.exit(8)
@@ -214,6 +217,10 @@ implementation:
         except Exception as e:
             sys.stderr.write("ERROR: Failed to write inference_results: " + str(e) + "\n")
             sys.exit(10)
+        PY
+
+        # execute the script with the same args provided by kfp (exec replaces the shell process)
+        exec python3 /tmp/infer.py "$@"
     args:
       - --tokenizer_json
       - {inputPath: tokenizer_json}
