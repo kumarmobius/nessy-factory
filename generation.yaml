@@ -1,4 +1,4 @@
-name: Run Inferening
+name: Run Inference
 description: |
   Loads Gemma3Model, generates text for multiple input prompts, and writes generation outputs to a JSON file.
   Accepts test_data_json as either (A) a JSON string (one-line) or (B) a path to a JSON file.
@@ -158,7 +158,15 @@ implementation:
         print(f"Processing {len(test_data)} test cases")
 
         results = []
-        for idx, input_text in enumerate(test_data):
+        for idx, item in enumerate(test_data):
+            # Handle both formats: string or [input, ground_truth] pair
+            if isinstance(item, str):
+                input_text = item
+            elif isinstance(item, list) and len(item) > 0:
+                input_text = item[0]  # Take first element as input
+            else:
+                input_text = str(item)
+            
             generated_output = generate_text(input_text, args.max_new_tokens, args.temperature, args.top_k)
             result = {
                 "inference_input": input_text,
