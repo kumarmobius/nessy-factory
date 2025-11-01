@@ -1,4 +1,4 @@
-name: LM Training
+name: LM Trainer
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -84,7 +84,7 @@ implementation:
         echo "[DEBUG] shell received args: $*"
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
-        import argparse, json, os, shutil, sys, csv, math, glob
+        import argparse, json, os, shutil, sys, csv, math, glob, logging
         from pathlib import Path
 
         DEFAULTS = {
@@ -124,7 +124,8 @@ implementation:
                             break
                     return "\n".join(lines)
             except Exception as e:
-                return f"<could not read {path}: {e}>"
+                logging.error('could not read file: %s %s', path, e)
+                return None
 
         def _is_number(x):
             try:
@@ -198,7 +199,6 @@ implementation:
                 print(f"[DEBUG] CSV parse failed for {path}: {e}")
             return out_loss, out_val
 
-        # ---------- main ----------
         def main():
             ap = argparse.ArgumentParser()
             ap.add_argument("--tokenizer-json", default=None)
@@ -249,7 +249,6 @@ implementation:
                 if d:
                     os.makedirs(d, exist_ok=True)
 
-            # copy model py
             src_py = _pick_model_py(args.model_py_in)
             dst = args.model_py_out
             if os.path.isdir(dst) or dst.endswith("/data"):
@@ -266,7 +265,7 @@ implementation:
                 dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
             shutil.copyfile(src_py, dst_file)
 
-            # ---- invoke trainer ----
+
             try:
                 from nesy_factory.language_model.train import GemmaTrainer
             except Exception as e:
