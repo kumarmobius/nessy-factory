@@ -1,4 +1,4 @@
-name: Inference with Scoring
+name: Inferencing with Metrics
 description: Loads GPTNeoX or Gemma, generates text for multiple input-output pairs, and calculates ROUGE and BLEU scores
 inputs:
   - name: tokenizer_json
