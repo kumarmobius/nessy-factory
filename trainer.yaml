@@ -81,7 +81,6 @@ implementation:
       - |-
         set -o pipefail
 
-        
         echo "[DEBUG] shell received args: $*"
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
@@ -229,25 +228,94 @@ implementation:
                 loss_curve_csv=args.loss_curve_csv,
             )
 
-            # Compact schema
-            # Compact schema using epoch/loss list
+
+            def _extract_curve(report, key_candidates):
+
+                for key in key_candidates:
+                    if key in report:
+                        raw = report[key]
+
+                        if isinstance(raw, list) and all(isinstance(x, (int, float)) for x in raw):
+                            return [float(x) for x in raw]
+ 
+                        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+                            # choose best candidate key from typical names
+                            for k in ("loss", "value", "train_loss", "validation_loss", "val_loss", "y"):
+                                if all((k in item) for item in raw):
+                                    return [float(item.get(k, float("nan"))) for item in raw]
+                            # fallback: pick the first numeric field present in dict
+                            first = raw[0]
+                            for k, v in first.items():
+                                if isinstance(v, (int, float)):
+                                    return [float(item.get(k, float("nan"))) for item in raw]
+                        # list of pairs/tuples: assume last item is the value
+                        if isinstance(raw, list) and raw and isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 2:
+                            return [float(x[-1]) for x in raw]
+                        # if empty list or unknown shape -> return empty
+                        return []
+                return []
+
+            # Try to load training_report safely
             try:
                 with open(args.training_report, "r", encoding="utf-8") as f:
                     report = json.load(f)
-                    train_curve = report.get("train_curve", [])
-                    val_curve = report.get("val_curve", [])
             except Exception as e:
-                train_curve, val_curve = [], []
                 print("[WARN] Could not load training_report:", e)
-            
-            schema_list = [
-                {"epoch": int(i), "loss": float(tr), "validation_loss": float(va)}
-                for i, (tr, va) in enumerate(zip(train_curve, val_curve), start=1)
-            ]
-            
-            with open(args.schema_output, "w", encoding="utf-8") as f:
+                report = {}
+
+            # Common possible keys for curves
+            train_keys = ["train_curve", "train_losses", "train_loss", "train", "train_history", "losses"]
+            val_keys   = ["val_curve", "val_losses", "val_loss", "validation_curve", "validation_loss", "val_history"]
+
+            train_curve = _extract_curve(report, train_keys)
+            val_curve   = _extract_curve(report, val_keys)
+
+            # If report includes nested dicts
+            if not train_curve and isinstance(report.get("train"), dict):
+                train_curve = _extract_curve(report["train"], ["loss", "losses", "train_curve"])
+            if not val_curve and isinstance(report.get("val"), dict):
+                val_curve = _extract_curve(report["val"], ["loss", "losses", "val_curve"])
+
+            # Final heuristic fallback: pick numeric lists from top-level keys
+            if (not train_curve) or (not val_curve):
+                numeric_lists = []
+                for k, v in report.items():
+                    if isinstance(v, list):
+                        nums = _extract_curve(report, [k])
+                        if nums:
+                            numeric_lists.append((k, nums))
+                numeric_lists.sort(key=lambda x: len(x[1]), reverse=True)
+                if numeric_lists:
+                    if not train_curve:
+                        train_curve = numeric_lists[0][1]
+                    if not val_curve and len(numeric_lists) > 1:
+                        val_curve = numeric_lists[1][1]
+
+            train_curve = [float(x) for x in train_curve] if train_curve else []
+            val_curve   = [float(x) for x in val_curve] if val_curve else []
+
+            max_len = max(len(train_curve), len(val_curve))
+            schema_list = []
+            for i in range(max_len):
+                tr = train_curve[i] if i < len(train_curve) else None
+                va = val_curve[i] if i < len(val_curve) else None
+                if tr is None and va is None:
+                    continue
+                schema_list.append({
+                    "epoch": i + 1,
+                    "loss": float(tr) if tr is not None else None,
+                    "validation_loss": float(va) if va is not None else None
+                })
+
+            schema_out_path = args.schema_output
+            if os.path.isdir(schema_out_path):
+                schema_out_path = os.path.join(schema_out_path, "schema.json")
+            os.makedirs(os.path.dirname(schema_out_path) or ".", exist_ok=True)
+
+            with open(schema_out_path, "w", encoding="utf-8") as f:
                 json.dump(schema_list, f, indent=2)
-            
+            print(f"[INFO] Wrote {len(schema_list)} schema entries to {schema_out_path}")
+
             print("[DONE] Training complete — schema_list written.")
 
 
