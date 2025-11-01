@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Training
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -201,13 +201,14 @@ implementation:
             print(" - model_py_out  :", _exist(args.model_py_out))
 
             # Train
+            # Train
             trainer = GemmaTrainer()
-            trainer.run(
+            result = trainer.run(
                 tokenizer_json=args.tokenizer_json,
                 train_corpus=args.train_corpus,
                 model_config=args.model_config,
                 model_weights=args.model_weights,
-                model_py_in=src_py,  # use the copied file
+                model_py_in=src_py,
                 model_py_out=dst_file,
                 learning_rate=args.learning_rate,
                 min_lr=args.min_lr,
@@ -228,54 +229,24 @@ implementation:
                 training_report=args.training_report,
                 loss_curve_csv=args.loss_curve_csv,
             )
-
-            # Compact schema
-            # Compact schema using epoch/loss list
-            # Build schema with robust key detection
-            try:
-                with open(args.training_report, "r", encoding="utf-8") as f:
-                    report = json.load(f)
-                print("[DEBUG] Training report keys:", list(report.keys()) if isinstance(report, dict) else type(report))
-                
-                train_curve = []
-                val_curve = []
-                
-                if isinstance(report, dict):
-                    # Try various possible key names for training loss
-                    for key in ['train_curve', 'train_losses', 'train_loss', 'losses', 'train']:
-                        if key in report and isinstance(report[key], list):
-                            train_curve = report[key]
-                            break
-                    
-                    # Try various possible key names for validation loss
-                    for key in ['val_curve', 'val_losses', 'val_loss', 'validation_loss', 'val']:
-                        if key in report and isinstance(report[key], list):
-                            val_curve = report[key]
-                            break
-                
-                print(f"[DEBUG] Extracted train_curve length: {len(train_curve)}, val_curve length: {len(val_curve)}")
-                
-            except Exception as e:
-                train_curve, val_curve = [], []
-                print("[WARN] Could not load training_report:", e)
             
-            # Build schema list
-            schema_list = []
-            max_len = max(len(train_curve), len(val_curve))
-            for i in range(max_len):
-                entry = {"epoch": i + 1}
-                if i < len(train_curve):
-                    entry["loss"] = float(train_curve[i])
-                if i < len(val_curve):
-                    entry["validation_loss"] = float(val_curve[i])
-                schema_list.append(entry)
+            # Extract curves from trainer result
+            train_curve = result.get('train_curve', []) if isinstance(result, dict) else []
+            val_curve = result.get('val_curve', []) if isinstance(result, dict) else []
             
-            print(f"[DEBUG] Schema list entries: {len(schema_list)}")
+            print('[DEBUG] train_curve length:', len(train_curve), 'val_curve length:', len(val_curve))
             
-            with open(args.schema_output, "w", encoding="utf-8") as f:
-                json.dump(schema_list, f, indent=2)
+            # Build schema
+            schema_list = [
+                {"epoch": int(i), "loss": float(tr), "validation_loss": float(va)}
+                for i, (tr, va) in enumerate(zip(train_curve, val_curve), start=1)
+            ]
             
-            print("[DONE] Training complete — schema written with", len(schema_list), "entries")
+            os.makedirs(os.path.dirname(args.schema_output) or '.', exist_ok=True)
+            with open(args.schema_output, 'w', encoding='utf-8') as f:
+                json.dump(schema_list, f, separators=(',', ':'))
+            
+            print('[DONE] Training complete - schema written with', len(schema_list), 'entries')
 
 
         if __name__ == "__main__":
