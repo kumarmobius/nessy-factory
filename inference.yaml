@@ -1,4 +1,4 @@
-name: Inferencing with Metrics
+name: Inferencing with Metrics score
 description: Loads GPTNeoX or Gemma, generates text for multiple input-output pairs, and calculates ROUGE and BLEU scores
 inputs:
   - name: tokenizer_json
@@ -49,27 +49,75 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, importlib.util, json, os, torch
+        import argparse, importlib.util, importlib.machinery, importlib, json, os, torch, shutil, types, sys
         from tokenizers import Tokenizer
         from rouge_score import rouge_scorer
         from sacrebleu.metrics import BLEU
         import torch.nn.functional as F
 
-        def find_model_py_file(directory):
-            if os.path.isfile(directory):
-                return directory
-            if not os.path.isdir(directory):
-                raise ValueError(f"Path {directory} is neither a file nor a directory")
-            py_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".py")]
-            if not py_files:
-                raise FileNotFoundError(f"No .py file found in directory {directory}")
-            return py_files[0]
 
-        def load_module_from_path(py_path, mod_name="gemma3_model"):
+        def find_model_py_file(path):
+            if os.path.isfile(path):
+                if path.endswith(".py"):
+                    print(f"[DEBUG] Using provided .py file: {path}")
+                    return path
+
+                tmp = path + ".py"
+                shutil.copyfile(path, tmp)
+                print(f"[DEBUG] Copied {path} to {tmp} to ensure .py extension")
+                return tmp
+
+            if os.path.isdir(path):
+                py_files = [os.path.join(path, f) for f in sorted(os.listdir(path)) if f.endswith(".py")]
+                if not py_files:
+                    raise FileNotFoundError(f"No .py files found inside directory: {path}")
+                if len(py_files) > 1:
+                    print(f"[WARN] Multiple .py files found in {path}; choosing first: {py_files[0]}")
+                print(f"[DEBUG] Selected .py file: {py_files[0]}")
+                return py_files[0]
+
+            raise FileNotFoundError(f"Model path not found or not a file/dir: {path}")
+
+        def load_module_from_path(py_path, mod_name="model_module"):
+            if not os.path.exists(py_path):
+                raise FileNotFoundError(f"Model file not found: {py_path}")
+
+            print(f"[DEBUG] Loading module {mod_name} from {py_path}")
             spec = importlib.util.spec_from_file_location(mod_name, py_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            if spec is not None and getattr(spec, "loader", None) is not None:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                print(f"[DEBUG] Loaded module via spec.loader")
+                return module
+
+            try:
+                print(f"[WARN] spec.loader is None or spec is None; trying SourceFileLoader")
+                loader = importlib.machinery.SourceFileLoader(mod_name, py_path)
+                module = types.ModuleType(mod_name)
+                loader.exec_module(module)
+                print(f"[DEBUG] Loaded module via SourceFileLoader")
+                return module
+            except Exception as e:
+                print(f"[ERROR] SourceFileLoader failed: {e}; trying manual exec fallback")
+
+            # final fallback: manual exec into module namespace
+            module = types.ModuleType(mod_name)
+            with open(py_path, "r", encoding="utf-8") as f:
+                code = f.read()
+            exec(compile(code, py_path, "exec"), module.__dict__)
+            print(f"[DEBUG] Loaded module via manual exec fallback")
             return module
+
+        def get_token_id(tokenizer, *keys):
+            for k in keys:
+                try:
+                    tid = tokenizer.token_to_id(k)
+                except Exception:
+                    tid = None
+                if tid is not None:
+                    return tid
+            return None
+
 
         parser = argparse.ArgumentParser()
         parser.add_argument("--tokenizer_json", type=str, required=True)
@@ -84,26 +132,52 @@ implementation:
         parser.add_argument("--inference_results", type=str, required=True)
         args = parser.parse_args()
 
-        os.makedirs(os.path.dirname(args.inference_results) or ".", exist_ok=True)
+        out_path = args.inference_results
+        if os.path.isdir(out_path):
+            print(f"[WARN] --inference_results is a directory; appending 'results.json'")
+            out_path = os.path.join(out_path, "results.json")
+        out_dir = os.path.dirname(out_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"[DEBUG] Will write results to: {out_path}")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_device = torch.device(device)
         model_dtype = torch.float16 if device == "cuda" else torch.float32
+        print(f"[DEBUG] Using device={device}, dtype={model_dtype}")
 
         tok = Tokenizer.from_file(args.tokenizer_json)
-        bos_id = tok.token_to_id("<s>") or tok.token_to_id("<bos>")
-        eos_id = tok.token_to_id("</s>") or tok.token_to_id("<eos>")
+        bos_id = get_token_id(tok, "<s>", "<bos>")
+        eos_id = get_token_id(tok, "</s>", "<eos>")
 
         with open(args.model_config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         cfg["dtype"] = model_dtype
 
         model_py_path = find_model_py_file(args.model_py)
-        mod = load_module_from_path(model_py_path, "gemma3_model")
-        Gemma3Model = getattr(mod, "Gemma3Model")
+        mod = load_module_from_path(model_py_path, "model_module")
 
-        model = Gemma3Model(cfg).to(torch_device)
+        ModelClass = None
+        for candidate in ("Gemma3Model", "GPTNeoXForCausalLM", "GPTNeoXModel", "Model"):
+            if hasattr(mod, candidate):
+                ModelClass = getattr(mod, candidate)
+                print(f"[DEBUG] Using model class: {candidate}")
+                break
+        if ModelClass is None:
+            print(f"[WARN] No standard model class name found; attempting 'get_model' factory")
+            if hasattr(mod, "get_model"):
+                ModelClass = mod.get_model
+            else:
+                raise AttributeError("Could not find model class (tried Gemma3Model, GPTNeoXForCausalLM, GPTNeoXModel, Model) or get_model factory in module")
+
+        if callable(ModelClass) and getattr(ModelClass, "__name__", "") == "get_model":
+            model = ModelClass(cfg).to(torch_device)
+        else:
+            model = ModelClass(cfg).to(torch_device)
+
         state = torch.load(args.learned_weights, map_location=torch_device)
+        # if state is a dict with 'state_dict' key, handle that
+        if isinstance(state, dict) and "state_dict" in state and not any(k.startswith("module.") for k in state.keys()):
+            state = state["state_dict"]
         model.load_state_dict(state, strict=True)
         model.eval()
 
@@ -121,7 +195,8 @@ implementation:
                     logits = model_output[0, -1]
                 logits = logits / temperature
                 if top_k is not None:
-                    indices_to_remove = logits < torch.topk(logits, top_k).values[-1]
+                    threshold = torch.topk(logits, top_k).values[-1]
+                    indices_to_remove = logits < threshold
                     logits[indices_to_remove] = -float("Inf")
                 probs = F.softmax(logits, dim=-1)
                 next_id = torch.multinomial(probs, 1).item()
@@ -136,11 +211,13 @@ implementation:
             return tok.decode(dec_ids)
 
         test_data = json.loads(args.test_data_json)
+        print(f"[DEBUG] Loaded {len(test_data)} test cases")
         rouge_sc = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
         bleu_metric = BLEU()
 
         results = []
-        for input_text, expected_output in test_data:
+        for idx, (input_text, expected_output) in enumerate(test_data):
+            print(f"[DEBUG] Running case {idx+1}/{len(test_data)}")
             generated_output = generate_text(input_text, args.max_new_tokens, args.temperature, args.top_k)
             rouge_scores = rouge_sc.score(expected_output, generated_output)
             rouge_score = rouge_scores['rougeL'].fmeasure
@@ -153,9 +230,11 @@ implementation:
                 "inference_score_rouge": round(rouge_score, 4),
                 "inference_score_bleu": round(bleu_score, 4)
             })
+            print(f"[DEBUG] Case {idx+1} -> ROUGE={rouge_score:.4f}, BLEU={bleu_score:.4f}")
 
-        with open(args.inference_results, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] Wrote {len(results)} results to {out_path}")
 
     args:
       - --tokenizer_json
