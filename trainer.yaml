@@ -69,7 +69,7 @@ outputs:
   - name: model_py
     type: Data
   - name: schema_json
-    type: Data
+    type: String
 
 implementation:
   container:
