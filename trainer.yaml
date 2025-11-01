@@ -1,4 +1,4 @@
-name: LM Trainer
+name: LM Training
 description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
 
 inputs:
@@ -84,7 +84,7 @@ implementation:
         echo "[DEBUG] shell received args: $*"
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
-        import argparse, json, os, shutil, sys
+        import argparse, json, os, shutil, sys, csv, math, glob
         from pathlib import Path
 
         DEFAULTS = {
@@ -114,11 +114,93 @@ implementation:
 
         def _exist(p): return Path(p).exists()
 
-        def main():
-            print("[DEBUG] sys.argv:", sys.argv, flush=True)
+        def _head(path, nlines=20):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = []
+                    for i, ln in enumerate(f):
+                        lines.append(ln.rstrip("\n"))
+                        if i+1 >= nlines:
+                            break
+                    return "\n".join(lines)
+            except Exception as e:
+                return f"<could not read {path}: {e}>"
 
+        def _is_number(x):
+            try:
+                float(x)
+                return True
+            except Exception:
+                return False
+
+        # robust extract from JSON structures
+        def _extract_curve_from_obj(obj):
+            # list of numbers
+            if isinstance(obj, list) and all(isinstance(x, (int, float)) for x in obj):
+                return [float(x) for x in obj]
+            # list of dicts -> common keys
+            if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+                for k in ("loss","value","y","train_loss","val_loss","validation_loss"):
+                    if all((k in it) for it in obj):
+                        try:
+                            return [float(it.get(k, math.nan)) for it in obj]
+                        except Exception:
+                            pass
+                first = obj[0]
+                for k, v in first.items():
+                    if isinstance(v, (int, float)):
+                        try:
+                            return [float(it.get(k, math.nan)) for it in obj]
+                        except Exception:
+                            pass
+            # list of pairs
+            if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple)) and len(obj[0]) >= 2:
+                try:
+                    return [float(x[-1]) for x in obj]
+                except Exception:
+                    pass
+            return []
+
+        def _extract_from_csv(path):
+            out_loss = []
+            out_val = []
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    # if headers present
+                    if reader.fieldnames:
+                        # normalize header names
+                        h = [c.strip().lower() for c in reader.fieldnames]
+                        # decide column names
+                        loss_col = None
+                        val_col = None
+                        for c in reader.fieldnames:
+                            cl = c.strip().lower()
+                            if cl in ("loss","train_loss","trainloss","train"):
+                                loss_col = c
+                            if cl in ("val_loss","validation_loss","valloss","val"):
+                                val_col = c
+                        # fallback heuristics
+                        rows = list(reader)
+                        if loss_col:
+                            out_loss = [float(r.get(loss_col)) for r in rows if _is_number(r.get(loss_col))]
+                        if val_col:
+                            out_val = [float(r.get(val_col)) for r in rows if _is_number(r.get(val_col))]
+                        # if no headers mapped, try first two numeric columns
+                        if not loss_col and rows:
+                            # try to pick first numeric column
+                            for col in reader.fieldnames:
+                                col_vals = [r.get(col) for r in rows]
+                                if all(_is_number(v) for v in col_vals if v is not None):
+                                    out_loss = [float(v) for v in col_vals if v is not None]
+                                    break
+            except Exception as e:
+                print(f"[DEBUG] CSV parse failed for {path}: {e}")
+            return out_loss, out_val
+
+        # ---------- main ----------
+        def main():
             ap = argparse.ArgumentParser()
-            # Make inputs OPTIONAL, then fallback to default KFP mount paths if missing.
             ap.add_argument("--tokenizer-json", default=None)
             ap.add_argument("--train-corpus",   default=None)
             ap.add_argument("--model-config",   default=None)
@@ -148,7 +230,7 @@ implementation:
             ap.add_argument("--schema-output",  default=None)
             args = ap.parse_args()
 
-            # Fallbacks for missing paths
+            # fallbacks
             for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
                       "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
                 if getattr(args, k.replace("-", "_")) in (None, ""):
@@ -160,53 +242,44 @@ implementation:
                 v = getattr(args, k.replace("-", "_"))
                 print(f"  {k:16s} -> {v} (exists={_exist(v)})")
 
-            from nesy_factory.language_model.train import GemmaTrainer
-
-            # Ensure output dirs exist
+            # ensure output dirs
             for p in (args.best_weights, args.final_weights, args.training_report,
                       args.loss_curve_csv, args.model_py_out, args.schema_output):
                 d = os.path.dirname(p)
                 if d:
                     os.makedirs(d, exist_ok=True)
 
-            # Normalize/copy model code
-            src = args.model_py_in
+            # copy model py
+            src_py = _pick_model_py(args.model_py_in)
             dst = args.model_py_out
-
             if os.path.isdir(dst) or dst.endswith("/data"):
                 os.makedirs(dst, exist_ok=True)
                 dst_file = os.path.join(dst, "model.py")
             else:
                 os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
                 dst_file = dst
-
             try:
-                same = os.path.exists(src) and os.path.exists(dst_file) and os.path.samefile(src, dst_file)
+                same = os.path.exists(src_py) and os.path.exists(dst_file) and os.path.samefile(src_py, dst_file)
             except Exception:
-                same = os.path.abspath(src) == os.path.abspath(dst_file)
+                same = os.path.abspath(src_py) == os.path.abspath(dst_file)
             if same:
                 dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
-            
-            src_py = _pick_model_py(args.model_py_in)
             shutil.copyfile(src_py, dst_file)
 
-            # Debug existence before invoking trainer
-            print("Pre-train existence checks:")
-            print(" - tokenizer_json:", _exist(args.tokenizer_json))
-            print(" - train_corpus  :", _exist(args.train_corpus))
-            print(" - model_config  :", _exist(args.model_config))
-            print(" - model_weights :", _exist(args.model_weights))
-            print(" - model_py_in   :", _exist(args.model_py_in))
-            print(" - model_py_out  :", _exist(args.model_py_out))
+            # ---- invoke trainer ----
+            try:
+                from nesy_factory.language_model.train import GemmaTrainer
+            except Exception as e:
+                print(f"[ERROR] Could not import GemmaTrainer: {e}")
+                raise
 
-            # Train
             trainer = GemmaTrainer()
             trainer.run(
                 tokenizer_json=args.tokenizer_json,
                 train_corpus=args.train_corpus,
                 model_config=args.model_config,
                 model_weights=args.model_weights,
-                model_py_in=src_py,  # use the copied file
+                model_py_in=src_py,
                 model_py_out=dst_file,
                 learning_rate=args.learning_rate,
                 min_lr=args.min_lr,
@@ -228,71 +301,90 @@ implementation:
                 loss_curve_csv=args.loss_curve_csv,
             )
 
+            # ------------- build schema -------------
+            report = {}
+            if os.path.exists(args.training_report):
+                try:
+                    with open(args.training_report, "r", encoding="utf-8") as f:
+                        report = json.load(f)
+                    print("[DEBUG] training_report preview:")
+                    print(json.dumps(report if isinstance(report, dict) else {"_report_type": type(report).__name__}, indent=2)[:2000])
+                except Exception as e:
+                    print(f"[WARN] could not load training_report JSON: {e}")
 
-            def _extract_curve(report, key_candidates):
+            train_curve = []
+            val_curve = []
 
-                for key in key_candidates:
-                    if key in report:
-                        raw = report[key]
+            # Common keys to try
+            def try_extract_from_report(rep):
+                out_train = []
+                out_val = []
+                # try direct keys
+                for k in ("train_curve","train_losses","train_loss","train","losses"):
+                    if k in rep:
+                        out_train = _extract_curve_from_obj(rep[k])
+                        if out_train:
+                            break
+                for k in ("val_curve","val_losses","val_loss","validation_curve","validation_loss","val_history"):
+                    if k in rep:
+                        out_val = _extract_curve_from_obj(rep[k])
+                        if out_val:
+                            break
+                # nested
+                if not out_train and isinstance(rep.get("train"), dict):
+                    out_train = _extract_curve_from_obj(rep["train"].get("losses") or rep["train"].get("loss") or rep["train"])
+                if not out_val and isinstance(rep.get("val"), dict):
+                    out_val = _extract_curve_from_obj(rep["val"].get("losses") or rep["val"].get("loss") or rep["val"])
+                return out_train, out_val
 
-                        if isinstance(raw, list) and all(isinstance(x, (int, float)) for x in raw):
-                            return [float(x) for x in raw]
- 
-                        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
-                            # choose best candidate key from typical names
-                            for k in ("loss", "value", "train_loss", "validation_loss", "val_loss", "y"):
-                                if all((k in item) for item in raw):
-                                    return [float(item.get(k, float("nan"))) for item in raw]
-                            # fallback: pick the first numeric field present in dict
-                            first = raw[0]
-                            for k, v in first.items():
-                                if isinstance(v, (int, float)):
-                                    return [float(item.get(k, float("nan"))) for item in raw]
-                        # list of pairs/tuples: assume last item is the value
-                        if isinstance(raw, list) and raw and isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 2:
-                            return [float(x[-1]) for x in raw]
-                        # if empty list or unknown shape -> return empty
-                        return []
-                return []
+            if isinstance(report, dict) and report:
+                t, v = try_extract_from_report(report)
+                train_curve.extend(t or [])
+                val_curve.extend(v or [])
 
-            # Try to load training_report safely
-            try:
-                with open(args.training_report, "r", encoding="utf-8") as f:
-                    report = json.load(f)
-            except Exception as e:
-                print("[WARN] Could not load training_report:", e)
-                report = {}
+            # if still empty, try loss_curve_csv
+            if (not train_curve) and os.path.exists(args.loss_curve_csv):
+                print(f"[DEBUG] attempting to parse CSV: {args.loss_curve_csv}")
+                l, v = _extract_from_csv(args.loss_curve_csv)
+                train_curve = train_curve or l
+                val_curve = val_curve or v
 
-            # Common possible keys for curves
-            train_keys = ["train_curve", "train_losses", "train_loss", "train", "train_history", "losses"]
-            val_keys   = ["val_curve", "val_losses", "val_loss", "validation_curve", "validation_loss", "val_history"]
+            # if still empty, scan output dir for likely JSON/CSV files
+            if (not train_curve) and (not val_curve):
+                outdir = os.path.dirname(args.training_report) or "."
+                candidates = []
+                for ext in ("*.json","*.ndjson","*.csv"):
+                    candidates.extend(glob.glob(os.path.join(outdir, ext)))
+                candidates = [c for c in candidates if not c.endswith(os.path.basename(args.training_report))]
+                for c in candidates:
+                    try:
+                        if c.endswith(".csv"):
+                            l, v = _extract_from_csv(c)
+                            if l and not train_curve:
+                                train_curve = l
+                            if v and not val_curve:
+                                val_curve = v
+                        else:
+                            with open(c, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            # try various shapes
+                            if isinstance(data, dict):
+                                t, v = try_extract_from_report(data)
+                                if t and not train_curve:
+                                    train_curve = t
+                                if v and not val_curve:
+                                    val_curve = v
+                            elif isinstance(data, list):
+                                # list of numbers?
+                                nums = _extract_curve_from_obj(data)
+                                if nums and not train_curve:
+                                    train_curve = nums
+                    except Exception as e:
+                        print(f"[DEBUG] scanning {c} failed: {e}")
 
-            train_curve = _extract_curve(report, train_keys)
-            val_curve   = _extract_curve(report, val_keys)
-
-            # If report includes nested dicts
-            if not train_curve and isinstance(report.get("train"), dict):
-                train_curve = _extract_curve(report["train"], ["loss", "losses", "train_curve"])
-            if not val_curve and isinstance(report.get("val"), dict):
-                val_curve = _extract_curve(report["val"], ["loss", "losses", "val_curve"])
-
-            # Final heuristic fallback: pick numeric lists from top-level keys
-            if (not train_curve) or (not val_curve):
-                numeric_lists = []
-                for k, v in report.items():
-                    if isinstance(v, list):
-                        nums = _extract_curve(report, [k])
-                        if nums:
-                            numeric_lists.append((k, nums))
-                numeric_lists.sort(key=lambda x: len(x[1]), reverse=True)
-                if numeric_lists:
-                    if not train_curve:
-                        train_curve = numeric_lists[0][1]
-                    if not val_curve and len(numeric_lists) > 1:
-                        val_curve = numeric_lists[1][1]
-
+            # finalize to floats
             train_curve = [float(x) for x in train_curve] if train_curve else []
-            val_curve   = [float(x) for x in val_curve] if val_curve else []
+            val_curve = [float(x) for x in val_curve] if val_curve else []
 
             max_len = max(len(train_curve), len(val_curve))
             schema_list = []
@@ -307,17 +399,20 @@ implementation:
                     "validation_loss": float(va) if va is not None else None
                 })
 
-            schema_out_path = args.schema_output
-            if os.path.isdir(schema_out_path):
-                schema_out_path = os.path.join(schema_out_path, "schema.json")
-            os.makedirs(os.path.dirname(schema_out_path) or ".", exist_ok=True)
+            # --- Save schema_json the same way as your inference job ---
+            schema_out = args.schema_output
+            # if user passed a directory, append filename
+            if os.path.isdir(schema_out):
+                schema_out = os.path.join(schema_out, "schema.json")
+            os.makedirs(os.path.dirname(schema_out) or ".", exist_ok=True)
 
-            with open(schema_out_path, "w", encoding="utf-8") as f:
-                json.dump(schema_list, f, indent=2)
-            print(f"[INFO] Wrote {len(schema_list)} schema entries to {schema_out_path}")
+            # Print schema to logs for debugging
+            print("[DEBUG] schema_list to be written (preview):")
+            print(json.dumps(schema_list, indent=2)[:4000])
 
-            print("[DONE] Training complete — schema_list written.")
-
+            with open(schema_out, "w", encoding="utf-8") as f:
+                json.dump(schema_list, f, indent=2, ensure_ascii=False)
+            print(f"[INFO] Wrote schema_json to: {schema_out} (entries={len(schema_list)})")
 
         if __name__ == "__main__":
             main()
