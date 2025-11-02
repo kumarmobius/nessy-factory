@@ -231,23 +231,36 @@ implementation:
             )
             
             # Extract curves from trainer result
-            train_curve = result.get('train_curve', []) if isinstance(result, dict) else []
-            val_curve = result.get('val_curve', []) if isinstance(result, dict) else []
+            import csv
             
-            print('[DEBUG] train_curve length:', len(train_curve), 'val_curve length:', len(val_curve))
+            schema_list = []
+            if os.path.exists(args.loss_curve_csv):
+                with open(args.loss_curve_csv, newline='', encoding='utf-8') as cf:
+                    rdr = csv.DictReader(cf)
+                    for row in rdr:
+                        try:
+                            epoch = int(row.get("update") or row.get("epoch") or len(schema_list) + 1)
+                            train_loss = float(row.get("train_loss") or row.get("loss") or 0)
+                            val_loss = float(row.get("val_loss") or row.get("validation_loss") or 0)
+                            schema_list.append({
+                                "epoch": epoch,
+                                "loss": train_loss,
+                                "validation_loss": val_loss
+                            })
+                        except Exception as e:
+                            print(f"[WARN] Skipped bad row: {row} ({e})")
             
-            # Build schema
-            schema_list = [
-                {"epoch": int(i), "loss": float(tr), "validation_loss": float(va)}
-                for i, (tr, va) in enumerate(zip(train_curve, val_curve), start=1)
-            ]
+            # Default file name if output path is a directory
+            schema_out = args.schema_output
+            if os.path.isdir(schema_out):
+                schema_out = os.path.join(schema_out, "schema.json")
             
-            os.makedirs(os.path.dirname(args.schema_output) or '.', exist_ok=True)
-            with open(args.schema_output, 'w', encoding='utf-8') as f:
-                json.dump(schema_list, f, separators=(',', ':'))
+            os.makedirs(os.path.dirname(schema_out) or ".", exist_ok=True)
             
-            print('[DONE] Training complete - schema written with', len(schema_list), 'entries')
-
+            with open(schema_out, "w", encoding="utf-8") as f:
+                json.dump(schema_list, f, indent=2)
+            
+            print(f"[DONE] Schema JSON written with {len(schema_list)} entries → {schema_out}")
 
         if __name__ == "__main__":
             main()
